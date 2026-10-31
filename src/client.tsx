@@ -1165,6 +1165,56 @@ function FilesPanel({ session, refreshKey }: { session: string; refreshKey: numb
   );
 }
 
+// ============================================================================
+// Config 标签页：每个 Worker 变量的名字、当前值、默认值、含义。
+// 数据来自 GET /api/config（server.ts 的 describeConfig）。换模型时看这里。
+// ============================================================================
+type ConfigItem = {
+  name: string;
+  value: string;
+  source: "variable" | "default";
+  defaultValue: string;
+  secret?: boolean;
+  description: string;
+};
+
+function ConfigPanel() {
+  const [items, setItems] = useState<ConfigItem[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    fetchJson<ConfigItem[]>("/api/config")
+      .then(setItems)
+      .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+  }, []);
+  return (
+    <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
+      <p className="px-1 text-[11px] leading-5 text-kumo-subtle">
+        这些是 Worker 变量（Dashboard → pi-harness → Settings → Variables and Secrets）。
+        灰色的是没设、用默认值；换模型时按这里的名字加。
+      </p>
+      {error ? <p className="px-1 text-xs text-kumo-danger">{error}</p> : null}
+      {items === null && !error ? <p className="px-1 text-xs text-kumo-subtle">Loading…</p> : null}
+      {items?.map((item) => (
+        <Surface key={item.name} className="rounded-lg p-3 ring ring-kumo-line">
+          <div className="flex items-center gap-2">
+            <code className="min-w-0 flex-1 truncate text-xs font-semibold">{item.name}</code>
+            <Badge variant={item.source === "variable" ? "success" : "secondary"}>
+              {item.source === "variable" ? "已设" : "默认"}
+            </Badge>
+          </div>
+          <div className="mt-1 break-all font-mono text-[11px] text-kumo-default">
+            {item.value || "—"}
+            {item.source === "variable" && item.defaultValue && !item.secret ? (
+              <span className="ml-2 text-kumo-inactive">(默认 {item.defaultValue})</span>
+            ) : null}
+          </div>
+          <p className="mt-1 text-xs leading-5 text-kumo-subtle">{item.description}</p>
+        </Surface>
+      ))}
+    </div>
+  );
+}
+
 function Sidebar({
   session,
   tools,
@@ -1178,7 +1228,7 @@ function Sidebar({
   filesRefreshKey: number;
   onClose: () => void;
 }) {
-  const [tab, setTab] = useState<"files" | "tools">("files");
+  const [tab, setTab] = useState<"files" | "tools" | "config">("files");
   const tabClass = (active: boolean) =>
     `rounded-md px-2.5 py-1 text-xs font-semibold ${
       active ? "bg-kumo-elevated text-kumo-default" : "text-kumo-subtle hover:text-kumo-default"
@@ -1208,6 +1258,15 @@ function Sidebar({
           >
             Tools
           </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "config"}
+            className={tabClass(tab === "config")}
+            onClick={() => setTab("config")}
+          >
+            Config
+          </button>
         </div>
         <Button
           variant="ghost"
@@ -1219,8 +1278,10 @@ function Sidebar({
       </div>
       {tab === "files" ? (
         <FilesPanel session={session} refreshKey={filesRefreshKey} />
-      ) : (
+      ) : tab === "tools" ? (
         <ToolsPanel tools={tools} activeTools={activeTools} />
+      ) : (
+        <ConfigPanel />
       )}
     </aside>
   );

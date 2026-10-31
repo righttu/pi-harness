@@ -18,7 +18,9 @@
   "worker_loaders": [{ "binding": "LOADER" }],
   "assets": {
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*", "/agents/*"]
+    // 这些路径走 Worker，其余都是前端静态页面（SPA 兜底）。
+    // 新加服务端路由记得补这里，否则会被前端页面接管。
+    "run_worker_first": ["/api/*", "/agents/*", "/share/*"]
   },
   "durable_objects": {
     "bindings": [

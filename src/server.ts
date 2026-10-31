@@ -87,6 +87,56 @@ type GatewayEnv = {
   PI_FETCH_ALLOW?: string;
 };
 
+/**
+ * 全部可配置变量的说明书。右栏 Config 标签页显示它，所以换模型时不用翻代码。
+ * 加新变量时在这里补一条。
+ */
+export type ConfigItem = {
+  name: string;
+  /** 当前生效的值（Secret 只显示是否已设）。 */
+  value: string;
+  /** 来自 Dashboard 变量，还是用的默认值。 */
+  source: "variable" | "default";
+  defaultValue: string;
+  secret?: boolean;
+  description: string;
+};
+
+export function describeConfig(env: GatewayEnv): ConfigItem[] {
+  const item = (
+    name: keyof GatewayEnv,
+    defaultValue: string,
+    description: string,
+    options: { secret?: boolean } = {}
+  ): ConfigItem => {
+    const raw = env[name];
+    const set = raw !== undefined && raw !== "";
+    return {
+      name,
+      value: options.secret ? (set ? "（已设置）" : "（未设置）") : set ? String(raw) : defaultValue,
+      source: set ? "variable" : "default",
+      defaultValue: options.secret ? "" : defaultValue,
+      ...(options.secret ? { secret: true } : {}),
+      description
+    };
+  };
+  const profile = modelProfile(env);
+  return [
+    item("CF_ACCOUNT_ID", "", "Cloudflare 账号 id。必填。"),
+    item("CF_AIG_TOKEN", "", "AI Gateway token。必填。", { secret: true }),
+    item("PI_MODEL_INPUT", "text", "模型能看什么：text 或 text,image。设成 text,image 后聊天框可贴图、read 会把图片/PDF 喂给模型。路由换成多模态模型时改。"),
+    item("PI_CONTEXT_WINDOW", String(CONTEXT_WINDOW), `上下文窗口（token）。决定什么时候压缩对话。当前生效 ${profile.contextWindow}。路由换成不同窗口的模型时改。`),
+    item("PI_MAX_TOKENS", "8192", "模型单次回答的最大长度（token）。只是上限，不会让回答变长。"),
+    item("PI_MODEL_REASONING", "false", "模型是否是思考型（qwen3-thinking、DeepSeek-R1、o 系列）。影响 pi 怎么请求和展示思考内容。"),
+    item("PI_SIDE_ROUTE", "", "子代理（subagent / subagents / review）走的 AI Gateway 动态路由名，如 pi-side。不设则和主 Agent 同一条路由。"),
+    item("PI_PRICE_INPUT", "0", "主模型每百万输入 token 的美元价格，用于标题栏成本显示。"),
+    item("PI_PRICE_OUTPUT", "0", "主模型每百万输出 token 的美元价格。"),
+    item("PI_FETCH_ALLOW", "*", "fetch 工具允许访问的主机名，逗号分隔，后缀匹配。* 放行全部。对外开放前建议收紧。"),
+    item("PI_PUBLIC_URL", "（最近一次请求的 origin）", "分享链接用的站点根，如 https://pi-agent.example.com。一般不用设。"),
+    item("PI_SHARE_SECRET", "", "分享链接的签名密钥。不设用 CF_AIG_TOKEN。", { secret: true })
+  ];
+}
+
 /** 从变量读出来的模型能力。 */
 function modelProfile(env: GatewayEnv) {
   const input = (env.PI_MODEL_INPUT ?? "text")
@@ -609,6 +659,11 @@ async function handleApi(
       headers.set("content-disposition", `attachment; filename*=UTF-8''${encodeURIComponent(name)}`);
     }
     return new Response(object.body, { headers });
+  }
+
+  // 当前生效的配置和每个变量的说明（右栏 Config 标签页）。
+  if (url.pathname === "/api/config" && method === "GET") {
+    return Response.json(describeConfig(env as unknown as GatewayEnv));
   }
 
   if (url.pathname === "/api/sessions") {

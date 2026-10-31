@@ -24,8 +24,18 @@ import {
   LiveDoc,
   type EntryId,
   type Extension,
+  type ModelRef,
   type ToolExecutionApi
 } from "@earendil-works/pi-durable";
+
+/** 子对话的配置项。 */
+export type SubagentOptions = {
+  /**
+   * 子对话用的模型（lead / sidekick 分层）。不传就继承父对话的模型。
+   * server.ts 从 Worker 变量 PI_SIDE_ROUTE 决定。
+   */
+  childModel?: ModelRef;
+};
 
 /** 记录的子对话步骤上限，防止一个跑很久的子对话把 details 撑大。 */
 const MAX_STEPS = 200;
@@ -45,10 +55,12 @@ async function answerText(
 }
 
 /**
- * 导出的扩展对象。在 server.ts 里用 `registry.install(Subagent)` 安装。
- * 用 const 自引用（下面 `remove: [Subagent]`）是官方示例的写法，运行时合法。
+ * 构造扩展。在 server.ts 里用 `registry.install(createSubagent({...}))` 安装。
+ * 工厂函数而不是常量，是为了把子对话模型传进来；`remove: [Subagent]` 的
+ * 自引用是官方示例的写法，运行时合法。
  */
-export const Subagent: Extension = defineExtension({
+export function createSubagent(options: SubagentOptions = {}): Extension {
+  const Subagent: Extension = defineExtension({
   name: "subagent",
   tools: [
     defineTool({
@@ -83,9 +95,10 @@ export const Subagent: Extension = defineExtension({
           const created = await tx.createConversation({
             ownership: { kind: "task", taskId: api.taskId }
           });
-          // 子对话里不再提供 subagent 工具，避免递归委派。
+          // 子对话里不再提供 subagent 工具，避免递归委派；模型按配置分层。
           await configure(tx, created.id, {
-            extensions: { remove: [Subagent] }
+            extensions: { remove: [Subagent] },
+            ...(options.childModel ? { model: options.childModel } : {})
           });
           return created.id;
         }, context);
@@ -155,3 +168,5 @@ export const Subagent: Extension = defineExtension({
     })
   ]
 });
+  return Subagent;
+}

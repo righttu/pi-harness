@@ -13,8 +13,8 @@ import { Lifecycle } from "agents/lifecycle";
 import { WebSockets } from "agents/websockets";
 import { PiSessionIndex } from "./sessions";
 import { PiSessionSockets } from "./sockets";
-import { Subagent } from "./subagent";
-import { SubagentsExtension } from "./subagents";
+import { createSubagent } from "./subagent";
+import { createSubagents } from "./subagents";
 import { createWorkspaceTools, JAVASCRIPT_BACKEND } from "./workspace";
 
 export { PiSessionIndex };
@@ -30,8 +30,14 @@ const PROVIDER_ID = "aigw";
  */
 const CONTEXT_WINDOW = 128_000;
 
-/** Worker 变量（Dashboard → Settings → Variables and Secrets）。 */
-type GatewayEnv = { CF_ACCOUNT_ID: string; CF_AIG_TOKEN: string };
+/**
+ * Worker 变量（Dashboard → Settings → Variables and Secrets）。
+ *   CF_ACCOUNT_ID   账号 id（Text）
+ *   CF_AIG_TOKEN    AI Gateway token（Secret）
+ *   PI_SIDE_ROUTE   可选。子代理（sidekick）走的动态路由名，比如 "pi-side"。
+ *                   不设则子代理和主 Agent 用同一条路由。
+ */
+type GatewayEnv = { CF_ACCOUNT_ID: string; CF_AIG_TOKEN: string; PI_SIDE_ROUTE?: string };
 
 /** 文件面板的一行。 */
 export type FileEntry = {
@@ -155,16 +161,15 @@ export class PiAgent extends DurableObject<Env> {
       //   SubagentsExtension（src/subagents.ts）：后台，并行，答案稍后作为
       //   新消息送回。
       // ======================================================================
-      this.registry.install(Subagent);
-      this.registry.install(SubagentsExtension);
       // 不走 Workers AI binding，而是用 OpenAI 兼容协议直接打 AI Gateway 的
       // /compat 入口（和 Brain 一样）。这个入口支持 Workers AI、内置供应商和
       // custom provider，所以路由节点换什么模型这里都不用改。
-      const { CF_ACCOUNT_ID, CF_AIG_TOKEN } = this.env as unknown as GatewayEnv;
+      const { CF_ACCOUNT_ID, CF_AIG_TOKEN, PI_SIDE_ROUTE } = this.env as unknown as GatewayEnv;
       const baseUrl = `https://gateway.ai.cloudflare.com/v1/${CF_ACCOUNT_ID}/${GATEWAY_ID}/compat`;
-      const routeModel: Model<"openai-completions"> = {
-        id: MODEL_ID,
-        name: "AI Gateway dynamic route",
+      // 每条动态路由在这里是一个"模型"；同一个 provider、同一个入口，只有 id 不同。
+      const routeModel = (id: string, name: string): Model<"openai-completions"> => ({
+        id,
+        name,
         api: "openai-completions",
         provider: PROVIDER_ID,
         baseUrl,
@@ -175,7 +180,18 @@ export class PiAgent extends DurableObject<Env> {
         maxTokens: 8192,
         headers: { "cf-aig-authorization": `Bearer ${CF_AIG_TOKEN}` },
         compat: { supportsDeveloperRole: false, supportsReasoningEffort: false }
-      };
+      });
+      const lead = routeModel(MODEL_ID, "AI Gateway dynamic route (lead)");
+      // ======================================================================
+      // lead / sidekick 分层：设了 PI_SIDE_ROUTE，子代理就走那条路由（通常是
+      // 更便宜、更快或更擅长写代码的模型）；主 Agent 仍用 pi-route。
+      // ======================================================================
+      const side = PI_SIDE_ROUTE
+        ? routeModel(`dynamic/${PI_SIDE_ROUTE}`, "AI Gateway dynamic route (sidekick)")
+        : undefined;
+      const childModel = side ? { provider: PROVIDER_ID, modelId: side.id } : undefined;
+      this.registry.install(createSubagent({ childModel }));
+      this.registry.install(createSubagents({ childModel }));
       const gateway = createProvider({
         id: PROVIDER_ID,
         name: "Cloudflare AI Gateway",
@@ -186,7 +202,7 @@ export class PiAgent extends DurableObject<Env> {
             resolve: async () => ({ auth: { apiKey: CF_AIG_TOKEN } })
           }
         },
-        models: [routeModel],
+        models: side ? [lead, side] : [lead],
         api: openAICompletionsApi()
       });
       const models = createModels();
@@ -262,7 +278,14 @@ export class PiAgent extends DurableObject<Env> {
   /** 列目录。路径必须在 /workspace 下。 */
   async listFiles(path: string): Promise<FileEntry[]> {
     const dir = normalizeWorkspacePath(path);
-    const entries = await this.workspace.fs.readdir(dir, { limit: 1000 });
+    let entries: Awaited<ReturnType<typeof this.workspace.fs.readdir>>;
+    try {
+      entries = await this.workspace.fs.readdir(dir, { limit: 1000 });
+    } catch (error) {
+      // 新会话还没写过文件时 /workspace 本身不存在：当作空目录，不报错。
+      if (dir === "/workspace" && /no such path/i.test(String(error))) return [];
+      throw error;
+    }
     return entries
       .map((entry) => ({
         name: entry.name,

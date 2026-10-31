@@ -35,8 +35,10 @@ import {
   type ConversationId,
   type EntryId,
   type Extension,
+  type ModelRef,
   type TaskId
 } from "@earendil-works/pi-durable";
+import type { SubagentOptions } from "./subagent";
 
 type Subagent = {
   conversationId: ConversationId;
@@ -156,7 +158,13 @@ function textOf(message: AssistantMessage | undefined): string {
     .join("");
 }
 
-const subagentsTool = defineTool({
+/**
+ * 构造扩展。任务定义随扩展一起安装，DO 重启后尚未完成的 Reporter 才能接着跑。
+ * 在 server.ts 用 `registry.install(createSubagents({...}))`。
+ */
+export function createSubagents(options: SubagentOptions = {}): Extension {
+  const childModel: ModelRef | undefined = options.childModel;
+  const subagentsTool = defineTool({
   name: "subagents",
   description:
     "Run several tasks in parallel with named background subagents, and keep working while they run. " +
@@ -230,6 +238,7 @@ const subagentsTool = defineTool({
         // 子代理不能再派子代理；并且知道自己是谁。
         await configure(tx, child.id, {
           extensions: { remove: [SubagentsExtension] },
+          ...(childModel ? { model: childModel } : {}),
           instructions:
             `You are the subagent "${name}", working for a main agent in a shared workspace. ` +
             "Do the task you are given completely, then answer with the result. Do not ask the " +
@@ -252,15 +261,13 @@ const subagentsTool = defineTool({
   }
 });
 
-/**
- * 任务定义随扩展一起安装，DO 重启后尚未完成的 Reporter 才能接着跑。
- * 在 server.ts 用 `registry.install(SubagentsExtension)`。
- */
-export const SubagentsExtension: Extension = defineExtension({
-  name: "subagents",
-  tasks: [Anchor, Reporter],
-  tools: [subagentsTool]
-});
+  const SubagentsExtension: Extension = defineExtension({
+    name: "subagents",
+    tasks: [Anchor, Reporter],
+    tools: [subagentsTool]
+  });
+  return SubagentsExtension;
+}
 
 /** 前端用：识别子代理的报告消息。 */
 export const SUBAGENT_REPORT = /^\[subagent (\S+) ([^\]]*)\] ?([\s\S]*)$/;

@@ -156,6 +156,163 @@ function JsonBlock({ value }: { value: unknown }) {
   );
 }
 
+/** 子对话过程里的一条步骤。 */
+function StepItem({
+  label,
+  done,
+  active
+}: {
+  label: string;
+  done?: boolean;
+  active?: boolean;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      {done ? (
+        <CheckCircleIcon size={12} className="shrink-0 text-kumo-success" />
+      ) : active ? (
+        <GearIcon size={12} className="shrink-0 animate-spin text-kumo-accent" />
+      ) : (
+        <div className="size-3 shrink-0 rounded-full border border-kumo-inactive" />
+      )}
+      <span
+        className={`text-xs ${
+          done
+            ? "text-kumo-subtle line-through"
+            : active
+              ? "text-kumo-default font-medium"
+              : "text-kumo-inactive"
+        }`}
+      >
+        {label}
+      </span>
+    </div>
+  );
+}
+
+/** 子对话调用时展示的卡片（运行中）。 */
+function SubagentCallCard({
+  part,
+  running
+}: {
+  part: Extract<TranscriptPart, { type: "tool-call" }>;
+  running: boolean;
+}) {
+  const task =
+    (part.arguments as { task?: string } | undefined)?.task ?? "Unknown task";
+  return (
+    <details className="rounded-xl border border-kumo-line bg-kumo-base" open={running}>
+      <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5">
+        {running ? (
+          <GearIcon size={14} className="animate-spin text-kumo-accent" />
+        ) : (
+          <CheckCircleIcon size={14} className="text-kumo-success" />
+        )}
+        <GitBranchIcon size={14} className="text-kumo-subtle" />
+        <span className="min-w-0 flex-1 truncate text-xs font-semibold">
+          Subagent
+        </span>
+        <Badge variant={running ? "primary" : "secondary"}>
+          {running ? "Running" : "Called"}
+        </Badge>
+      </summary>
+      <div className="space-y-3 border-t border-kumo-line px-3 py-3">
+        <div>
+          <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-kumo-inactive">
+            Task
+          </p>
+          <p className="whitespace-pre-wrap text-xs text-kumo-default">
+            {task}
+          </p>
+        </div>
+        {running && (
+          <div className="space-y-2">
+            <p className="text-[10px] font-semibold uppercase tracking-wide text-kumo-inactive">
+              Progress
+            </p>
+            <div className="space-y-1.5">
+              <StepItem done label="Create sub-conversation" />
+              <StepItem done label="Submit task" />
+              <StepItem active label="Processing in sub-conversation…" />
+            </div>
+          </div>
+        )}
+      </div>
+    </details>
+  );
+}
+
+/** 子对话完成后的结果卡片。 */
+function SubagentResultCard({
+  part
+}: {
+  part: Extract<TranscriptPart, { type: "tool-result" }>;
+}) {
+  const details = part.details as
+    | { conversationId?: string; task?: string; status?: string }
+    | undefined;
+  const task = details?.task ?? "Unknown task";
+  const conversationId = details?.conversationId;
+
+  const text = part.content
+    .filter((content) => content.type === "text")
+    .map((content) => (content.type === "text" ? content.text : ""))
+    .join("\n");
+
+  return (
+    <details className="rounded-xl border border-kumo-line bg-kumo-base">
+      <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5">
+        {part.error ? (
+          <XCircleIcon size={14} className="text-kumo-danger" />
+        ) : (
+          <CheckCircleIcon size={14} className="text-kumo-success" />
+        )}
+        <GitBranchIcon size={14} className="text-kumo-subtle" />
+        <span className="min-w-0 flex-1 truncate text-xs">
+          <span className="font-semibold">Subagent</span>
+          <span className="ml-2 text-kumo-subtle">
+            {task.slice(0, 60)}
+            {task.length > 60 ? "…" : ""}
+          </span>
+        </span>
+        <Badge variant={part.error ? "destructive" : "secondary"}>
+          {part.error ? "Failed" : "Done"}
+        </Badge>
+      </summary>
+      <div className="space-y-3 border-t border-kumo-line px-3 py-3">
+        <div>
+          <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-kumo-inactive">
+            Task
+          </p>
+          <p className="whitespace-pre-wrap text-xs text-kumo-default">
+            {task}
+          </p>
+        </div>
+        {conversationId && (
+          <div>
+            <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-kumo-inactive">
+              Conversation ID
+            </p>
+            <code className="rounded bg-kumo-elevated px-1.5 py-0.5 text-xs">
+              {conversationId}
+            </code>
+          </div>
+        )}
+        {text && (
+          <div>
+            <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-kumo-inactive">
+              Result
+            </p>
+            <div className="rounded-lg bg-kumo-elevated p-2.5 text-xs leading-5 whitespace-pre-wrap">
+              {text}
+            </div>
+          </div>
+        )}
+      </div>
+    </details>
+  );
+}
+
 function ToolCallCard({
   part,
   running
@@ -163,6 +320,9 @@ function ToolCallCard({
   part: Extract<TranscriptPart, { type: "tool-call" }>;
   running: boolean;
 }) {
+  if (part.name === "subagent") {
+    return <SubagentCallCard part={part} running={running} />;
+  }
   return (
     <details className="rounded-xl border border-kumo-line bg-kumo-base">
       <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5">
@@ -191,6 +351,9 @@ function ToolResultCard({
 }: {
   part: Extract<TranscriptPart, { type: "tool-result" }>;
 }) {
+  if (part.name === "subagent") {
+    return <SubagentResultCard part={part} />;
+  }
   const text = part.content
     .filter((content) => content.type === "text")
     .map((content) => (content.type === "text" ? content.text : ""))

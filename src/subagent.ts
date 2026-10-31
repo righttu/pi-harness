@@ -106,7 +106,11 @@ export const Subagent: Extension = defineExtension({
         const text = await answerText(api, settled.answer, context);
         return {
           output: [{ type: "text", text }],
-          details: { conversationId: child }
+          details: {
+            conversationId: child,
+            task,
+            status: "completed"
+          }
         };
       }
     })

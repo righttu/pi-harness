@@ -18,7 +18,7 @@ commit 哈希对应 GitHub `righttu/pi-harness` 的提交。
 
 ---
 
-## 未发布 — R2 发布/分享、模型能力改为变量、聊天贴图
+## 7712d98 — 2026-10-31 — R2 发布/分享、模型能力改为变量、聊天贴图
 
 ### R2（桶 `pi-files`，绑定 `PI_FILES`）
 - 新工具 `publish(path, expiresSeconds?)`：把工作区文件**流式**复制到 R2 `shared/<uuid>/...`，返回带 HMAC 签名、会过期的链接（默认 24 h，最长 7 天）。系统提示要求产出文件时用它交付。

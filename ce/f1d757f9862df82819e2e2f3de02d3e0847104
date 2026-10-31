@@ -1,0 +1,19 @@
+CHANGELOG.md
+  s_6f18dd121ce268::t_f40b7c5c31a338 22
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "cef1d757f9862df82819e2e2f3de02d3e0847104",
+  "prompts": {},
+  "sessions": {
+    "s_6f18dd121ce268": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_e73ba4895ffegcjq23ifMtMG44",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    }
+  }
+}

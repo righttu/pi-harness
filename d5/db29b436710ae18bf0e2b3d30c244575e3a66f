@@ -1,0 +1,23 @@
+CHANGELOG.md
+  s_6f18dd121ce268::t_0d2713d7a1e889 16-17,22-35
+src/fetch-tool.ts
+  s_6f18dd121ce268::t_df87edaa9a7111 1-186
+src/server.ts
+  s_6f18dd121ce268::t_457b2bf2c4d7f0 21,69-70,87,134-135,158-160,198,330-335,343,467-470,473-474,478-480,483-487,492-494,681-686,694-695,701,706,709
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d5db29b436710ae18bf0e2b3d30c244575e3a66f",
+  "prompts": {},
+  "sessions": {
+    "s_6f18dd121ce268": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_e73ba4895ffegcjq23ifMtMG44",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    }
+  }
+}

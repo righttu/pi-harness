@@ -13,7 +13,7 @@ commit 哈希对应 GitHub `righttu/pi-harness` 的提交。
 
 ---
 
-## 未发布 — 文件上传、会话分支、预览渲染、成本显示、Reviewer、Plan mode
+## 52211ce — 2026-10-31 — 文件上传、会话分支、预览渲染、成本显示、Reviewer、Plan mode
 
 ### 文件上传
 - Files 面板加上传按钮（可多选），传到当前目录，同名覆盖。`PUT /api/session/<uuid>/file?path=`，单文件上限 20 MiB。

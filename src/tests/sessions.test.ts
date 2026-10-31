@@ -33,4 +33,18 @@ describe("PiSessionIndex", () => {
     await index.remove(crypto.randomUUID());
     expect(await index.rename(crypto.randomUUID(), "x")).toBeUndefined();
   });
+
+  it("keeps branches under their object and removes them with it", async () => {
+    const index = env.PiSessionIndex.getByName(`owner-${crypto.randomUUID()}`);
+    const object = crypto.randomUUID();
+    const root = await index.upsert({ id: object });
+    expect(root).toMatchObject({ object, branch: null, parent: null });
+
+    const branch = await index.upsert({ id: `${object}:7`, parent: object, title: "try B" });
+    expect(branch).toMatchObject({ object, branch: "7", parent: object, title: "try B" });
+
+    const other = await index.upsert({ id: crypto.randomUUID() });
+    await index.removeObject(object);
+    expect((await index.list()).map((s) => s.id)).toEqual([other.id]);
+  });
 });

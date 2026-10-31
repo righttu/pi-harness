@@ -31,20 +31,27 @@ const INITIAL_STATE: State = {
  * socket never delivered; the harness deduplicates them by operation id, so
  * each runs once.
  */
-export function usePiSession(object: string) {
+/**
+ * @param object  Durable Object 名（会话 UUID）。
+ * @param branch  同一个对象里的 pi session id（分支）；省略为根会话。
+ */
+export function usePiSession(object: string, branch?: string) {
   const [state, setState] = useState<State>(INITIAL_STATE);
   // Unanswered submits, sent again each time the socket opens.
   const [outbox] = useState(() => new PiCommandOutbox());
-  // Another object starts from a clean slate.
-  const [stateObject, setStateObject] = useState(object);
-  if (stateObject !== object) {
-    setStateObject(object);
+  // Another object or branch starts from a clean slate.
+  const key = `${object}:${branch ?? ""}`;
+  const [stateKey, setStateKey] = useState(key);
+  if (stateKey !== key) {
+    setStateKey(key);
     setState(INITIAL_STATE);
   }
 
   const agent = useAgent({
     agent: "pi-agent",
     name: object,
+    // 服务端 sockets.ts 按 ?session= 选 pi session。
+    ...(branch ? { query: { session: branch } } : {}),
     onOpen: () => setState((current) => ({ ...current, status: "open" })),
     onClose: () => setState((current) => ({ ...current, status: "closed" })),
     onMessage: (event) => {
@@ -77,7 +84,7 @@ export function usePiSession(object: string) {
   useEffect(() => {
     // Submits belong to the last object's session: never send them here.
     outbox.clear();
-  }, [object, outbox]);
+  }, [key, outbox]);
 
   useEffect(() => {
     if (state.status !== "open") return;

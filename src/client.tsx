@@ -22,12 +22,15 @@ import {
   GitBranchIcon,
   MoonIcon,
   PaperPlaneRightIcon,
+  GitForkIcon,
+  ListChecksIcon,
   PencilSimpleIcon,
   PlusIcon,
   SidebarSimpleIcon,
   StopIcon,
   SunIcon,
   TrashIcon,
+  UploadSimpleIcon,
   UsersThreeIcon,
   WrenchIcon,
   XCircleIcon,
@@ -81,12 +84,26 @@ const SUGGESTIONS = [
 
 const SESSIONS_KEY = "pi-harness-sessions";
 
-/** `title` 是用户改的名字，或者从第一条消息自动取的；没有就显示 id。 */
-type SessionEntry = { id: string; createdAt: number; title?: string };
+/**
+ * 一条会话。`id` 是目录项 id：根会话 = DO 的 UUID，分支 = "UUID:<pi session>"。
+ * `object` 是 DO 名，`branch` 是 pi session id（根会话没有）。
+ * `title` 是用户改的名字，或者从第一条消息自动取的；没有就显示 id。
+ */
+type SessionEntry = {
+  id: string;
+  object: string;
+  branch?: string;
+  parent?: string;
+  createdAt: number;
+  title?: string;
+};
 
 /** 服务端目录项（src/sessions.ts 的 SessionRecord）。 */
 type SessionRecord = {
   id: string;
+  object: string;
+  branch: string | null;
+  parent: string | null;
   title: string | null;
   createdAt: number;
   updatedAt: number;
@@ -95,9 +112,39 @@ type SessionRecord = {
 function fromRecord(record: SessionRecord): SessionEntry {
   return {
     id: record.id,
+    object: record.object,
+    ...(record.branch ? { branch: record.branch } : {}),
+    ...(record.parent ? { parent: record.parent } : {}),
     createdAt: record.createdAt,
     ...(record.title ? { title: record.title } : {})
   };
+}
+
+/** 本地新建的根会话。 */
+function newEntry(): SessionEntry {
+  const id = crypto.randomUUID();
+  return { id, object: id, createdAt: Date.now() };
+}
+
+/** 会话状态（server.ts 的 SessionState）。 */
+type SessionState = {
+  planMode: boolean;
+  plan: string[];
+  usage: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    totalTokens: number;
+    cost: number;
+  };
+};
+
+/** `/api/session/<object>/<sub>?session=<branch>` 这类地址。 */
+function sessionUrl(entry: Pick<SessionEntry, "object" | "branch">, sub: string, params: Record<string, string> = {}): string {
+  const search = new URLSearchParams({ ...(entry.branch ? { session: entry.branch } : {}), ...params });
+  const query = search.toString();
+  return `/api/session/${entry.object}/${sub}${query ? `?${query}` : ""}`;
 }
 
 async function fetchJson<T>(input: string, init?: RequestInit): Promise<T> {
@@ -125,7 +172,19 @@ const sessionsApi = {
       method: "PATCH",
       body: JSON.stringify({ title })
     }),
-  remove: (id: string) => fetchJson<{ deleted: string }>(`/api/session/${id}`, { method: "DELETE" })
+  remove: (id: string) =>
+    fetchJson<{ deleted: string }>(`/api/sessions/${id}`, { method: "DELETE" }),
+  fork: (entry: SessionEntry, title: string) =>
+    fetchJson<SessionRecord>(sessionUrl(entry, "fork"), {
+      method: "POST",
+      body: JSON.stringify({ title })
+    }),
+  state: (entry: SessionEntry) => fetchJson<SessionState>(sessionUrl(entry, "state")),
+  setPlanMode: (entry: SessionEntry, on: boolean) =>
+    fetchJson<{ planMode: boolean }>(sessionUrl(entry, "plan"), {
+      method: "POST",
+      body: JSON.stringify({ on })
+    })
 };
 
 /** 读取会话目录；不存在或损坏则返回空数组。 */
@@ -135,13 +194,16 @@ function loadSessions(): SessionEntry[] {
     if (!raw) return [];
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (s): s is SessionEntry =>
-        typeof s === "object" &&
-        s !== null &&
-        typeof (s as SessionEntry).id === "string" &&
-        typeof (s as SessionEntry).createdAt === "number"
-    );
+    return parsed
+      .filter(
+        (s): s is SessionEntry =>
+          typeof s === "object" &&
+          s !== null &&
+          typeof (s as SessionEntry).id === "string" &&
+          typeof (s as SessionEntry).createdAt === "number"
+      )
+      // 旧版缓存没有 object 字段：根会话的 object 就是 id。
+      .map((s) => ({ ...s, object: s.object ?? s.id.split(":")[0] }));
   } catch {
     return [];
   }
@@ -159,10 +221,10 @@ function initSessions(): { current: string; sessions: SessionEntry[] } {
   let sessions = loadSessions();
   const legacy = localStorage.getItem(SESSION_KEY);
   if (legacy && !sessions.some((s) => s.id === legacy)) {
-    sessions = [{ id: legacy, createdAt: Date.now() }, ...sessions];
+    sessions = [{ id: legacy, object: legacy, createdAt: Date.now() }, ...sessions];
   }
   if (sessions.length === 0) {
-    sessions = [{ id: crypto.randomUUID(), createdAt: Date.now() }];
+    sessions = [newEntry()];
   }
   saveSessions(sessions);
   const current =
@@ -178,9 +240,16 @@ function sessionTime(entry: SessionEntry): string {
   ).padStart(2, "0")}:${String(when.getMinutes()).padStart(2, "0")}`;
 }
 
-/** 列表里显示的名字：用户起的标题，否则 UUID 前 8 位。 */
+/** 列表里显示的名字：用户起的标题，否则 UUID 前 8 位（分支再加 #<id>）。 */
 function sessionLabel(entry: SessionEntry): string {
-  return entry.title?.trim() || entry.id.slice(0, 8);
+  if (entry.title?.trim()) return entry.title.trim();
+  return entry.branch ? `${entry.object.slice(0, 8)} #${entry.branch}` : entry.object.slice(0, 8);
+}
+
+function formatTokens(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`;
+  return `${(n / 1_000_000).toFixed(2)}M`;
 }
 
 /** 自动标题：第一条用户消息的前 40 个字符。 */
@@ -281,8 +350,13 @@ function StepList({ steps, running }: { steps: readonly string[]; running: boole
 }
 
 function taskOf(args: unknown): string {
-  return (args as { task?: string } | undefined)?.task ?? "Unknown task";
+  const a = args as { task?: string; summary?: string } | undefined;
+  return a?.task ?? a?.summary ?? "Unknown task";
 }
+
+/** 这几种工具用"子对话"卡片（任务 + 过程 + 结果）而不是通用 JSON 卡片。 */
+const CHILD_TOOLS = new Set(["subagent", "review"]);
+const childLabel = (name: string) => (name === "review" ? "Review" : "Subagent");
 
 /** 子对话调用时展示的卡片。`output` 是运行中流过来的步骤文本。 */
 function SubagentCallCard({
@@ -309,7 +383,7 @@ function SubagentCallCard({
         )}
         <GitBranchIcon size={14} className="text-kumo-subtle" />
         <span className="min-w-0 flex-1 truncate text-xs">
-          <span className="font-semibold">Subagent</span>
+          <span className="font-semibold">{childLabel(part.name)}</span>
           <span className="ml-2 text-kumo-subtle">{task}</span>
         </span>
         <Badge variant={running ? "primary" : "secondary"}>
@@ -364,7 +438,7 @@ function SubagentResultCard({
         )}
         <GitBranchIcon size={14} className="text-kumo-subtle" />
         <span className="min-w-0 flex-1 truncate text-xs">
-          <span className="font-semibold">Subagent</span>
+          <span className="font-semibold">{childLabel(part.name)}</span>
           <span className="ml-2 text-kumo-subtle">
             {task.slice(0, 60)}
             {task.length > 60 ? "…" : ""}
@@ -404,10 +478,12 @@ function SubagentResultCard({
         {text && (
           <div>
             <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-kumo-inactive">
-              Result
+              {part.name === "review" ? "Findings" : "Result"}
             </p>
-            <div className="rounded-lg bg-kumo-elevated p-2.5 text-xs leading-5 whitespace-pre-wrap">
-              {text}
+            <div className="rounded-lg bg-kumo-elevated p-2.5">
+              <Streamdown className="sd-theme text-xs leading-5" plugins={{ code }} controls={false}>
+                {text}
+              </Streamdown>
             </div>
           </div>
         )}
@@ -425,7 +501,7 @@ function ToolCallCard({
   running: boolean;
   output: string;
 }) {
-  if (part.name === "subagent") {
+  if (CHILD_TOOLS.has(part.name)) {
     return <SubagentCallCard part={part} running={running} output={output} />;
   }
   return (
@@ -456,7 +532,7 @@ function ToolResultCard({
 }: {
   part: Extract<TranscriptPart, { type: "tool-result" }>;
 }) {
-  if (part.name === "subagent") {
+  if (CHILD_TOOLS.has(part.name)) {
     return <SubagentResultCard part={part} />;
   }
   const text = part.content
@@ -754,6 +830,22 @@ function formatSize(bytes: number): string {
 const TEXT_TYPES = /^(text\/|application\/(json|javascript|xml))/;
 const IMAGE_TYPES = /^image\//;
 
+/** 按扩展名选代码高亮语言；返回 undefined 表示当普通文本。 */
+function languageOf(path: string): string | undefined {
+  const ext = path.slice(path.lastIndexOf(".") + 1).toLowerCase();
+  const map: Record<string, string> = {
+    js: "javascript", mjs: "javascript", cjs: "javascript", jsx: "jsx",
+    ts: "typescript", tsx: "tsx", json: "json", jsonc: "json",
+    py: "python", rb: "ruby", go: "go", rs: "rust", java: "java", kt: "kotlin",
+    c: "c", h: "c", cpp: "cpp", hpp: "cpp", cs: "csharp", swift: "swift",
+    sh: "bash", bash: "bash", zsh: "bash", ps1: "powershell",
+    html: "html", css: "css", scss: "scss", xml: "xml", svg: "xml",
+    yml: "yaml", yaml: "yaml", toml: "toml", ini: "ini", sql: "sql",
+    csv: "csv", diff: "diff", patch: "diff", dockerfile: "docker"
+  };
+  return map[ext];
+}
+
 function FilePreview({
   session,
   path,
@@ -843,7 +935,18 @@ function FilePreview({
                 Showing the first part of {formatSize(state.size)}. Download for the whole file.
               </p>
             ) : null}
-            <pre className="text-xs leading-5 whitespace-pre-wrap break-words">{state.text}</pre>
+            {/\.(md|markdown)$/i.test(path) ? (
+              <Streamdown className="sd-theme text-sm leading-6" plugins={{ code }} controls={false}>
+                {state.text}
+              </Streamdown>
+            ) : languageOf(path) ? (
+              <Streamdown className="sd-theme text-xs" plugins={{ code }} controls={false}>
+                {/* 外层用四个反引号，文件内容里出现 ``` 也不会把围栏切断 */}
+                {`\`\`\`\`${languageOf(path)}\n${state.text}\n\`\`\`\``}
+              </Streamdown>
+            ) : (
+              <pre className="text-xs leading-5 whitespace-pre-wrap break-words">{state.text}</pre>
+            )}
           </>
         )}
       </div>
@@ -857,6 +960,31 @@ function FilesPanel({ session, refreshKey }: { session: string; refreshKey: numb
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
+  const [uploading, setUploading] = useState<string | null>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+
+  /** 上传到当前目录，同名覆盖。一个个传，失败就停。 */
+  const upload = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    setError(null);
+    try {
+      for (const file of Array.from(files)) {
+        setUploading(file.name);
+        const target = `${dir}/${file.name}`;
+        const response = await fetch(
+          `/api/session/${session}/file?path=${encodeURIComponent(target)}`,
+          { method: "PUT", body: file }
+        );
+        if (!response.ok) throw new Error(`${file.name}: ${response.status} ${await response.text()}`);
+      }
+      setTick((n) => n + 1);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setUploading(null);
+      if (fileInput.current) fileInput.current.value = "";
+    }
+  };
 
   // 换会话回到根目录、关掉预览。
   useEffect(() => {
@@ -909,6 +1037,30 @@ function FilesPanel({ session, refreshKey }: { session: string; refreshKey: numb
             );
           })}
         </div>
+        <input
+          ref={fileInput}
+          type="file"
+          multiple
+          className="hidden"
+          onChange={(event) => void upload(event.target.files)}
+        />
+        <span title={uploading ? `Uploading ${uploading}…` : `Upload to ${dir}`}>
+          <Button
+            variant="ghost"
+            shape="square"
+            size="sm"
+            aria-label="Upload files"
+            disabled={uploading !== null}
+            onClick={() => fileInput.current?.click()}
+            icon={
+              uploading ? (
+                <GearIcon size={14} className="animate-spin" />
+              ) : (
+                <UploadSimpleIcon size={14} />
+              )
+            }
+          />
+        </span>
         <Button
           variant="ghost"
           shape="square"
@@ -1035,6 +1187,16 @@ function SessionSidebar({
   onDelete: (id: string) => void;
   onClose: () => void;
 }) {
+  // 根会话按目录顺序；每个根会话后面紧跟它（这个 DO）的分支。
+  const ordered: SessionEntry[] = [];
+  for (const entry of sessions) {
+    if (entry.branch) continue;
+    ordered.push(entry, ...sessions.filter((s) => s.branch && s.object === entry.object));
+  }
+  // 根会话已不在目录里的孤儿分支放最后。
+  for (const entry of sessions) {
+    if (entry.branch && !ordered.includes(entry)) ordered.push(entry);
+  }
   return (
     <aside
       className="flex min-h-0 flex-col border-r border-kumo-line bg-kumo-base"
@@ -1067,15 +1229,15 @@ function SessionSidebar({
         </div>
       </div>
       <ul className="min-h-0 flex-1 space-y-0.5 overflow-y-auto p-2">
-        {sessions.map((entry) => {
+        {ordered.map((entry) => {
           const active = entry.id === current;
           const busy = deleting.has(entry.id);
           return (
             <li
               key={entry.id}
               className={`group flex items-center gap-1 rounded-lg pr-1 ${
-                active ? "bg-kumo-elevated" : "hover:bg-kumo-elevated/60"
-              } ${busy ? "opacity-50" : ""}`}
+                entry.branch ? "ml-3 border-l border-kumo-line pl-1" : ""
+              } ${active ? "bg-kumo-elevated" : "hover:bg-kumo-elevated/60"} ${busy ? "opacity-50" : ""}`}
             >
               <button
                 type="button"
@@ -1084,13 +1246,13 @@ function SessionSidebar({
                 aria-current={active ? "true" : undefined}
                 className="min-w-0 flex-1 px-2.5 py-2 text-left"
               >
-                <div
-                  className={`truncate text-sm ${active ? "font-semibold" : ""}`}
-                >
-                  {sessionLabel(entry)}
+                <div className={`flex items-center gap-1 truncate text-sm ${active ? "font-semibold" : ""}`}>
+                  {entry.branch ? <GitForkIcon size={12} className="shrink-0 text-kumo-inactive" /> : null}
+                  <span className="truncate">{sessionLabel(entry)}</span>
                 </div>
                 <div className="truncate text-[10px] text-kumo-inactive">
-                  {sessionTime(entry)} · {entry.id.slice(0, 8)}
+                  {sessionTime(entry)} · {entry.object.slice(0, 8)}
+                  {entry.branch ? ` #${entry.branch}` : ""}
                 </div>
               </button>
               {/* 悬停或当前项才显示操作按钮，避免列表太吵 */}
@@ -1168,7 +1330,7 @@ function App() {
         if (merged.length === 0) {
           // 服务端是空的（全新账号）：把当前这个登记上去。
           const current = loadSessions().find((s) => s.id === localStorage.getItem(SESSION_KEY));
-          const entry = current ?? { id: crypto.randomUUID(), createdAt: Date.now() };
+          const entry = current ?? newEntry();
           merged.push(fromRecord(await sessionsApi.register(entry)));
         }
         updateSessions(merged);
@@ -1186,6 +1348,14 @@ function App() {
   }, []);
   // ==========================================================================
 
+  /** 当前目录项；目录里找不到（比如刚被别处删了）就按根会话对待。 */
+  const current: SessionEntry = sessions.find((s) => s.id === session) ?? {
+    id: session,
+    object: session.split(":")[0],
+    ...(session.includes(":") ? { branch: session.split(":")[1] } : {}),
+    createdAt: 0
+  };
+
   const [prompt, setPrompt] = useState("");
   const wide = () => window.matchMedia("(min-width: 1100px)").matches;
   const [toolsOpen, setToolsOpen] = useState(wide);
@@ -1202,7 +1372,7 @@ function App() {
     error,
     submit: submitPrompt,
     abort
-  } = usePiSession(session);
+  } = usePiSession(current.object, current.branch);
 
   // ==========================================================================
   // 自动滚动，但只在你本来就在底部的时候。
@@ -1278,7 +1448,7 @@ function App() {
 
   /** 新建：生成一个新 UUID，加进目录顶部，并切换过去。旧会话保留。 */
   const newSession = () => {
-    const entry: SessionEntry = { id: crypto.randomUUID(), createdAt: Date.now() };
+    const entry = newEntry();
     updateSessions([entry, ...sessions]);
     setSession(entry.id);
     sessionsApi.register(entry).catch((cause) => console.warn("register failed", cause));
@@ -1307,22 +1477,23 @@ function App() {
   const deleteSession = async (target: string) => {
     const entry = sessions.find((s) => s.id === target);
     if (!entry) return;
-    if (
-      !window.confirm(
-        `删除会话「${sessionLabel(entry)}」？对话记录和工作区文件会一起删除，不可恢复。`
-      )
-    ) {
-      return;
-    }
+    const branches = sessions.filter((s) => s.branch && s.object === entry.object && s.id !== target);
+    const warning = entry.branch
+      ? `删除分支「${sessionLabel(entry)}」？只是从列表移除；它的记录随源会话一起保存或删除。`
+      : `删除会话「${sessionLabel(entry)}」？对话记录和工作区文件会一起删除，不可恢复。` +
+        (branches.length > 0 ? `\n它的 ${branches.length} 个分支也会一起删除。` : "");
+    if (!window.confirm(warning)) return;
+    // 删根会话时，它的分支也从本地列表去掉（服务端 removeObject 会一起删）。
+    const removing = new Set(entry.branch ? [target] : [target, ...branches.map((s) => s.id)]);
     setDeleting((set) => new Set(set).add(target));
-    let next = sessions.filter((s) => s.id !== target);
+    let next = sessions.filter((s) => !removing.has(s.id));
     if (next.length === 0) {
-      const fresh: SessionEntry = { id: crypto.randomUUID(), createdAt: Date.now() };
+      const fresh = newEntry();
       next = [fresh];
       sessionsApi.register(fresh).catch((cause) => console.warn("register failed", cause));
     }
     updateSessions(next);
-    if (target === session) setSession(next[0].id);
+    if (removing.has(session)) setSession(next[0].id);
     try {
       await sessionsApi.remove(target);
     } catch (cause) {
@@ -1336,6 +1507,61 @@ function App() {
         return copy;
       });
     }
+  };
+  // ==========================================================================
+
+  // ==========================================================================
+  // 分支 / Plan mode / 用量
+  // ==========================================================================
+  const [forking, setForking] = useState(false);
+  const [sessionState, setSessionInfo] = useState<SessionState | null>(null);
+  const planMode = sessionState?.planMode ?? false;
+
+  // 载入和每轮结束时刷新状态（用量、plan mode、计划）。
+  useEffect(() => {
+    let cancelled = false;
+    setSessionInfo(null);
+    sessionsApi
+      .state(current)
+      .then((state) => {
+        if (!cancelled) setSessionInfo(state);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [current.id, filesRefreshKey]);
+
+  const branchSession = async () => {
+    setForking(true);
+    try {
+      const title = `${sessionLabel(current)} · branch`;
+      const record = await sessionsApi.fork(current, title);
+      const entry = fromRecord(record);
+      updateSessions([entry, ...sessions]);
+      setSession(entry.id);
+    } catch (cause) {
+      window.alert(`分支失败：${cause instanceof Error ? cause.message : String(cause)}`);
+    } finally {
+      setForking(false);
+    }
+  };
+
+  const togglePlanMode = async (on: boolean) => {
+    try {
+      await sessionsApi.setPlanMode(current, on);
+      setSessionInfo((state) => (state ? { ...state, planMode: on } : state));
+    } catch (cause) {
+      window.alert(`切换失败：${cause instanceof Error ? cause.message : String(cause)}`);
+    }
+  };
+
+  /** 用户看过计划点"执行"：关 plan mode，让模型按计划做。 */
+  const executePlan = async () => {
+    await togglePlanMode(false);
+    submitPrompt("The plan is approved. Execute it step by step, reporting after each step.", "followUp");
+    scrollToBottom();
   };
   // ==========================================================================
 
@@ -1383,16 +1609,19 @@ function App() {
                 />
               )}
               <div className="min-w-0">
-                <h1 className="truncate text-base font-semibold">
-                  {sessionLabel(
-                    sessions.find((s) => s.id === session) ?? {
-                      id: session,
-                      createdAt: 0
-                    }
-                  )}
-                </h1>
+                <h1 className="truncate text-base font-semibold">{sessionLabel(current)}</h1>
                 <p className="truncate text-xs text-kumo-subtle">
-                  {session.slice(0, 8)}
+                  {current.object.slice(0, 8)}
+                  {current.branch ? ` · branch #${current.branch}` : ""}
+                  {sessionState ? (
+                    <span
+                      className="ml-2"
+                      title={`input ${sessionState.usage.input.toLocaleString()} · output ${sessionState.usage.output.toLocaleString()} · cache read ${sessionState.usage.cacheRead.toLocaleString()}`}
+                    >
+                      · {formatTokens(sessionState.usage.input)} in / {formatTokens(sessionState.usage.output)} out
+                      {sessionState.usage.cost > 0 ? ` · $${sessionState.usage.cost.toFixed(4)}` : ""}
+                    </span>
+                  ) : null}
                 </p>
               </div>
             </div>
@@ -1400,6 +1629,30 @@ function App() {
               <Badge variant="secondary" className="hidden sm:inline-flex">
                 {MODEL.split("/").at(-1)}
               </Badge>
+              {/* Plan mode 开关：开着时模型只能读和提交计划 */}
+              <span title={planMode ? "Plan mode 开着：模型只读、只出计划。再点关闭。" : "打开 Plan mode：先让模型出计划，你确认后再执行。"}>
+                <Button
+                  variant={planMode ? "primary" : "ghost"}
+                  size="sm"
+                  aria-pressed={planMode}
+                  disabled={!connected || running}
+                  onClick={() => void togglePlanMode(!planMode)}
+                  icon={<ListChecksIcon size={14} />}
+                >
+                  Plan
+                </Button>
+              </span>
+              {/* 分支：从当前会话 fork 一个新会话，共享到现在为止的历史 */}
+              <span title="从这里分支：新会话看得到到现在为止的全部对话，之后各走各的。工作区共享。">
+                <Button
+                  variant="ghost"
+                  shape="square"
+                  aria-label="Branch from here"
+                  disabled={!connected || running || forking}
+                  onClick={() => void branchSession()}
+                  icon={<GitForkIcon size={16} />}
+                />
+              </span>
               <Badge variant={connected ? "success" : "secondary"}>
                 {connected
                   ? "Live"
@@ -1482,7 +1735,7 @@ function App() {
 
             {/* 运行中工具的流式输出。subagent 的输出已经画在它自己的卡片里。 */}
             {runningTools.map((tool) =>
-              tool.output && tool.name !== "subagent" ? (
+              tool.output && !CHILD_TOOLS.has(tool.name) ? (
                 <pre
                   key={tool.callId}
                   className="ml-11 max-h-40 overflow-auto rounded-lg bg-kumo-elevated p-2.5 text-xs"
@@ -1521,6 +1774,35 @@ function App() {
             >
               {running ? "Follow" : "Latest"}
             </Button>
+          </div>
+        ) : null}
+
+        {/* Plan mode 下模型提交了计划：列出来，让用户决定执行还是改。 */}
+        {planMode && sessionState && sessionState.plan.length > 0 && !running ? (
+          <div className="shrink-0 border-t border-kumo-line bg-kumo-base">
+            <div className="mx-auto max-w-3xl px-5 pt-4">
+              <Surface className="rounded-xl p-4 ring ring-kumo-line">
+                <div className="mb-2 flex items-center gap-2">
+                  <ListChecksIcon size={16} className="text-kumo-accent" />
+                  <Text size="sm" bold>
+                    Plan ({sessionState.plan.length} steps)
+                  </Text>
+                </div>
+                <ol className="list-decimal space-y-1 pl-5 text-sm leading-6">
+                  {sessionState.plan.map((step, index) => (
+                    <li key={index}>{step}</li>
+                  ))}
+                </ol>
+                <div className="mt-3 flex gap-2">
+                  <Button variant="primary" size="sm" disabled={!connected} onClick={() => void executePlan()}>
+                    Execute plan
+                  </Button>
+                  <span className="self-center text-xs text-kumo-subtle">
+                    或在下面输入修改意见，模型会重新出计划。
+                  </span>
+                </div>
+              </Surface>
+            </div>
           </div>
         ) : null}
 
@@ -1606,7 +1888,7 @@ function App() {
 
       {toolsOpen ? (
         <Sidebar
-          session={session}
+          session={current.object}
           tools={catalog}
           activeTools={runningNames}
           filesRefreshKey={filesRefreshKey}

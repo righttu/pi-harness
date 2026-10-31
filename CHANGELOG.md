@@ -8,7 +8,38 @@ commit 哈希对应 GitHub `righttu/pi-harness` 的提交。
 - **命名**：所有组件以 `pi` 开头。Cloudflare 资源名（Worker、网关、路由、变量）用小写 `pi-xxx`；
   代码里的类名用 `PiXxx`（JS 标识符不能带连字符）。给模型用的工具名（`read`、`subagent`…）不算组件，不加前缀。
 - **部署**：推到 `main` 由 Workers Builds 自动部署。Dashboard 里设的普通变量靠 `keep_vars: true` 保留。
-- **Worker 变量**：`CF_ACCOUNT_ID`（Text）、`CF_AIG_TOKEN`（Secret）、`PI_SIDE_ROUTE`（Text，可选，子代理走的路由名）。
+- **Worker 变量**：`CF_ACCOUNT_ID`（Text）、`CF_AIG_TOKEN`（Secret）、`PI_SIDE_ROUTE`（Text，可选，子代理走的路由名）、
+  `PI_PRICE_INPUT` / `PI_PRICE_OUTPUT`（Text，可选，主模型每百万 token 的美元价格，用于成本显示）。
+
+---
+
+## 未发布 — 文件上传、会话分支、预览渲染、成本显示、Reviewer、Plan mode
+
+### 文件上传
+- Files 面板加上传按钮（可多选），传到当前目录，同名覆盖。`PUT /api/session/<uuid>/file?path=`，单文件上限 20 MiB。
+
+### 会话分支（复制）
+- 标题栏加"分支"按钮：在同一个 DO 里 `harness.sessions.fork()` 一个新 pi session，它看得到源会话到现在为止的全部历史，之后各走各的；工作区共享。
+- 目录项 id 变为 `UUID` 或 `UUID:<pi session>`；`PiSessionIndex` 表加 `object / branch / parent` 列（启动时自动补列）。
+- 左栏分支缩进显示在源会话下面。删根会话连带删它的分支；删分支只从目录移除（数据随源 DO）。
+- `POST /api/session/<uuid>/fork?session=`、`DELETE /api/sessions/<sid>`。
+
+### 预览渲染
+- Files 预览：`.md` 用 Streamdown 渲染；代码文件按扩展名语法高亮；其他仍是纯文本。
+
+### 成本显示
+- 标题栏显示本会话 token：`12.3k in / 2.1k out`，悬停看明细。配置 `PI_PRICE_INPUT` / `PI_PRICE_OUTPUT` 后显示美元。
+- 数据来自 pi 的 `UsageDoc`，`GET /api/session/<uuid>/state`，载入和每轮结束刷新。
+
+### Reviewer（`src/quality.ts`）
+- 新工具 `review(summary, files)`：开一个只读子对话（read/ls/find/grep），角色是审查员，默认用 sidekick 模型；有"再看一遍"循环（最多 3 轮），直到说 "No further findings."。发现列表返回主 Agent。
+- 系统提示要求：写完或改完代码先 review 再汇报，修掉发现的问题。
+- 前端用和 subagent 一样的卡片展示，Findings 按 Markdown 渲染。
+
+### Plan mode（`src/quality.ts`）
+- 标题栏 Plan 开关。开着时主对话只有只读工具和 `submit_plan`，系统提示要求"先读、出计划、什么都别改"。
+- 模型提交计划后，输入框上方显示计划卡片，点 "Execute plan" 关掉 plan mode 并让模型按计划执行；或输入修改意见让它重出。
+- `POST /api/session/<uuid>/plan { on }`。默认扩展集现在显式写为 playground / subagent / subagents / review，否则 Plan 的系统提示会常驻。
 
 ---
 

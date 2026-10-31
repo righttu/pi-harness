@@ -3,16 +3,31 @@ import { Workspace, type DurableObjectStorageLike } from "@cloudflare/computer";
 import { WorkerJavaScriptBackend } from "@cloudflare/computer/backends/worker-javascript";
 import { createGitClient } from "@cloudflare/computer/git";
 import { createGitModule } from "@cloudflare/computer/modules/git";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createProvider, type Model } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { createModels } from "@earendil-works/pi-ai/models";
-import { createRegistry, Harness } from "@earendil-works/pi-durable";
+import {
+  createRegistry,
+  Harness,
+  UsageDoc,
+  type Extension,
+  type ToolRegistration
+} from "@earendil-works/pi-durable";
 import { routeAgentRequest } from "agents";
-import { PiHarness } from "agents/harness/pi";
+import { PiHarness, ROOT_SESSION } from "agents/harness/pi";
 import { Lifecycle } from "agents/lifecycle";
 import { WebSockets } from "agents/websockets";
-import { PiSessionIndex } from "./sessions";
+import { PiSessionIndex, splitSessionId } from "./sessions";
 import { PiSessionSockets } from "./sockets";
+import {
+  createReview,
+  enterPlanMode,
+  leavePlanMode,
+  Plan,
+  PlanDoc,
+  ReviewerRole
+} from "./quality";
 import { createSubagent } from "./subagent";
 import { createSubagents } from "./subagents";
 import { createWorkspaceTools, JAVASCRIPT_BACKEND } from "./workspace";
@@ -36,8 +51,31 @@ const CONTEXT_WINDOW = 128_000;
  *   CF_AIG_TOKEN    AI Gateway token（Secret）
  *   PI_SIDE_ROUTE   可选。子代理（sidekick）走的动态路由名，比如 "pi-side"。
  *                   不设则子代理和主 Agent 用同一条路由。
+ *   PI_PRICE_INPUT  可选。主模型每百万输入 token 的价格（美元），用于成本显示。
+ *   PI_PRICE_OUTPUT 可选。同上，输出 token。不设则只显示 token 数。
  */
-type GatewayEnv = { CF_ACCOUNT_ID: string; CF_AIG_TOKEN: string; PI_SIDE_ROUTE?: string };
+type GatewayEnv = {
+  CF_ACCOUNT_ID: string;
+  CF_AIG_TOKEN: string;
+  PI_SIDE_ROUTE?: string;
+  PI_PRICE_INPUT?: string;
+  PI_PRICE_OUTPUT?: string;
+};
+
+/** 一个会话（pi session）的状态，GET /api/session/<id>/state 返回。 */
+export type SessionState = {
+  planMode: boolean;
+  plan: string[];
+  usage: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    totalTokens: number;
+    /** 美元；没配价格时为 0。 */
+    cost: number;
+  };
+};
 
 /** 文件面板的一行。 */
 export type FileEntry = {
@@ -70,6 +108,10 @@ function normalizeWorkspacePath(input: string): string {
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** 目录项 id：UUID，或 "UUID:<pi session id>"（分支）。 */
+const SESSION_ID = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?::([1-9][0-9]{0,15}))?$/i;
+/** 上传上限。RPC 参数一次传完，再大就该走 R2 了。 */
+const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
 
 /**
  * 会话目录属于谁。接了 Cloudflare Access 后这个头是登录邮箱；没接就是
@@ -116,6 +158,7 @@ How to work:
 - For tasks with several steps, say what you are going to do, then report briefly after each step completes, so progress is visible if the task is long.
 - When a step fails, say what failed and what you are trying next; do not silently retry the same thing.
 - Use subagent for one self-contained piece of work you need before continuing. Use subagents to run several independent pieces in parallel while you keep working; their answers arrive as later messages.
+- After writing or changing code, call review with a summary and the file paths before you report it as done. Fix what it finds, then say what the review found and what you fixed.
 - Finish with a short summary of what changed, with file paths.`;
 
 /** Playable pi session backed by one Durable Object. */
@@ -138,22 +181,26 @@ export class PiAgent extends DurableObject<Env> {
     ]
   });
   readonly registry = createRegistry();
+  /** 工作区工具，harness 工厂里赋值；plan mode 切换时要用。 */
+  workspaceTools: ToolRegistration[] = [];
   readonly harness = new PiHarness({
     harness: async ({ storage, context, onWake }) => {
       // pi's own extension: the system prompt and the workspace tools.
-      this.registry.install({
+      // ==================================================================
+      // 工具输出上限。read 默认 256 KiB ≈ 6 万 token，一次就占掉半个上下文
+      // 窗口；收到 48 KiB，超出的部分提示模型用 offset/limit 分段或 grep。
+      // exec 的 stdout 同理。
+      // ==================================================================
+      this.workspaceTools = createWorkspaceTools(this.workspace, {
+        read: { maxBytes: 48 * 1024, maxLines: 1200 },
+        execOutput: { maxBytes: 32 * 1024, maxLines: 800 }
+      });
+      const playground: Extension = {
         name: "playground",
         sections: [{ key: "preamble", render: () => PREAMBLE, tag: false }],
-        tools: createWorkspaceTools(this.workspace, {
-          // ==============================================================
-          // 工具输出上限。read 默认 256 KiB ≈ 6 万 token，一次就占掉半个
-          // 上下文窗口；收到 48 KiB，超出的部分提示模型用 offset/limit 分段
-          // 或 grep。exec 的 stdout 同理。
-          // ==============================================================
-          read: { maxBytes: 48 * 1024, maxLines: 1200 },
-          execOutput: { maxBytes: 32 * 1024, maxLines: 800 }
-        })
-      });
+        tools: this.workspaceTools
+      };
+      this.registry.install(playground);
       // ======================================================================
       // 两种子代理，都单独作为扩展安装（不合并进 playground），这样子对话
       // 可以只移除它们、保留工作区工具。
@@ -164,7 +211,15 @@ export class PiAgent extends DurableObject<Env> {
       // 不走 Workers AI binding，而是用 OpenAI 兼容协议直接打 AI Gateway 的
       // /compat 入口（和 Brain 一样）。这个入口支持 Workers AI、内置供应商和
       // custom provider，所以路由节点换什么模型这里都不用改。
-      const { CF_ACCOUNT_ID, CF_AIG_TOKEN, PI_SIDE_ROUTE } = this.env as unknown as GatewayEnv;
+      const { CF_ACCOUNT_ID, CF_AIG_TOKEN, PI_SIDE_ROUTE, PI_PRICE_INPUT, PI_PRICE_OUTPUT } =
+        this.env as unknown as GatewayEnv;
+      // pi 按 cost 字段算每轮花费；单位是美元 / 百万 token。
+      const price = {
+        input: Number(PI_PRICE_INPUT ?? 0) || 0,
+        output: Number(PI_PRICE_OUTPUT ?? 0) || 0,
+        cacheRead: 0,
+        cacheWrite: 0
+      };
       const baseUrl = `https://gateway.ai.cloudflare.com/v1/${CF_ACCOUNT_ID}/${GATEWAY_ID}/compat`;
       // 每条动态路由在这里是一个"模型"；同一个 provider、同一个入口，只有 id 不同。
       const routeModel = (id: string, name: string): Model<"openai-completions"> => ({
@@ -175,7 +230,7 @@ export class PiAgent extends DurableObject<Env> {
         baseUrl,
         reasoning: false,
         input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        cost: price,
         contextWindow: CONTEXT_WINDOW,
         maxTokens: 8192,
         headers: { "cf-aig-authorization": `Bearer ${CF_AIG_TOKEN}` },
@@ -190,8 +245,22 @@ export class PiAgent extends DurableObject<Env> {
         ? routeModel(`dynamic/${PI_SIDE_ROUTE}`, "AI Gateway dynamic route (sidekick)")
         : undefined;
       const childModel = side ? { provider: PROVIDER_ID, modelId: side.id } : undefined;
-      this.registry.install(createSubagent({ childModel }));
-      this.registry.install(createSubagents({ childModel }));
+      const subagent = createSubagent({ childModel });
+      const subagents = createSubagents({ childModel });
+      const review = createReview({
+        childModel,
+        workspaceTools: this.workspaceTools,
+        removeInChild: [subagent, subagents]
+      });
+      for (const extension of [subagent, subagents, review, ReviewerRole, Plan]) {
+        this.registry.install(extension);
+      }
+      // ======================================================================
+      // 默认只选这四个扩展。ReviewerRole 只装在 reviewer 子对话上，Plan 只在
+      // 用户打开 plan mode 时加到主对话上（见 setPlanMode）。不写这一条，
+      // "默认"就是全部已安装扩展，Plan 的系统提示会一直生效。
+      // ======================================================================
+      const defaultExtensions = [playground, subagent, subagents, review];
       const gateway = createProvider({
         id: PROVIDER_ID,
         name: "Cloudflare AI Gateway",
@@ -214,6 +283,7 @@ export class PiAgent extends DurableObject<Env> {
           registry: this.registry,
           onWake,
           settings: {
+            extensions: defaultExtensions,
             // pi doubles the delay before each retry: 1, 2, 4, 8 and 16 seconds,
             // so a rate-limited model gets about 30 seconds to recover.
             retry: { enabled: true, maxRetries: 5, baseDelayMs: 1000 },
@@ -319,6 +389,55 @@ export class PiAgent extends DurableObject<Env> {
     return { data, size: stat.size, truncated: stat.size > data.byteLength };
   }
 
+  /** 上传：写一个文件（覆盖）。目录不存在就建。 */
+  async writeFile(path: string, data: Uint8Array): Promise<{ path: string; size: number }> {
+    const file = normalizeWorkspacePath(path);
+    if (file === "/workspace") throw new Error("Path is a directory");
+    const dir = file.slice(0, file.lastIndexOf("/"));
+    await this.workspace.fs.mkdir(dir, { recursive: true });
+    await this.workspace.fs.writeFile(file, data);
+    return { path: file, size: data.byteLength };
+  }
+
+  // ==========================================================================
+  // 分支：在同一个 DO 里 fork 一个 pi session，它看得到源会话到现在为止的全部
+  // 历史，之后各走各的。工作区是共享的（同一个 DO）。返回新 session 的 id，
+  // 前端用 ?session=<id> 连它。
+  // ==========================================================================
+  async fork(from: string): Promise<string> {
+    const session = await this.harness.sessions.fork(from);
+    return session.id;
+  }
+
+  /** 会话状态：是否在 plan mode、当前计划、token 用量。 */
+  async sessionState(session: string): Promise<SessionState> {
+    const pi = await this.harness.pi();
+    const conversation = await this.harness.conversation(session);
+    const agent = await conversation.agent(BACKGROUND_CONTEXT);
+    const planMode = agent.extensions.some((extension) => extension.name === Plan.name);
+    const plan = (await pi.snapshot(PlanDoc, conversation.id, BACKGROUND_CONTEXT))?.steps ?? [];
+    const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: 0 };
+    const state = await pi.snapshot(UsageDoc, conversation.id, BACKGROUND_CONTEXT);
+    for (const bucket of Object.values(state?.models ?? {})) {
+      usage.input += bucket.input ?? 0;
+      usage.output += bucket.output ?? 0;
+      usage.cacheRead += bucket.cacheRead ?? 0;
+      usage.cacheWrite += bucket.cacheWrite ?? 0;
+      usage.totalTokens += bucket.totalTokens ?? 0;
+      usage.cost += bucket.cost?.total ?? 0;
+    }
+    return { planMode, plan, usage };
+  }
+
+  /** 切换 plan mode（见 src/quality.ts）。 */
+  async setPlanMode(session: string, on: boolean): Promise<void> {
+    const conversation = await this.harness.conversation(session);
+    await conversation.configure(
+      on ? enterPlanMode(this.workspaceTools) : leavePlanMode,
+      BACKGROUND_CONTEXT
+    );
+  }
+
   async destroy(): Promise<void> {
     for (const socket of this.ctx.getWebSockets()) {
       try {
@@ -338,14 +457,20 @@ export class PiAgent extends DurableObject<Env> {
 // ============================================================================
 // REST 路由（WebSocket 之外的部分）。
 //
-//   GET    /api/sessions                 当前用户的会话目录
-//   POST   /api/sessions                 登记一个会话 { id?, title?, createdAt? }
-//   PATCH  /api/sessions/<uuid>          改名 { title }
-//   DELETE /api/session/<uuid>           删除会话：清掉 PiAgent 的全部数据，
-//                                        并从目录移除
-//   GET    /api/session/<uuid>/files?path=/workspace[/sub]      列目录
-//   GET    /api/session/<uuid>/file?path=/workspace/x[&download=1]  读文件
+//   GET    /api/sessions                      当前用户的会话目录
+//   POST   /api/sessions                      登记一个会话 { id?, title?, createdAt? }
+//   PATCH  /api/sessions/<sid>                改名 { title }
+//   DELETE /api/sessions/<sid>                删除：根会话 → 清掉整个 DO 和它所有分支；
+//                                             分支 → 只从目录移除（数据随 DO）
+//   DELETE /api/session/<uuid>                同上（旧路径）
+//   GET    /api/session/<uuid>/files?path=    列目录
+//   GET    /api/session/<uuid>/file?path=     读文件 [&download=1]
+//   PUT    /api/session/<uuid>/file?path=     上传（body 是文件内容）
+//   POST   /api/session/<uuid>/fork?session=  fork 一个分支，返回 { id, branch }
+//   GET    /api/session/<uuid>/state?session= { planMode, plan, usage }
+//   POST   /api/session/<uuid>/plan?session=  { on: boolean } 切换 plan mode
 //
+// <sid> 是目录项 id（UUID 或 UUID:branch）；?session= 是 pi session id，省略为根。
 // 返回 undefined 表示不归这里管，交给 routeAgentRequest。
 // ============================================================================
 async function handleApi(
@@ -355,6 +480,7 @@ async function handleApi(
 ): Promise<Response | undefined> {
   const { method } = request;
   const index = () => env.PiSessionIndex.getByName(ownerOf(request));
+  const bad = (message: string, status = 400) => Response.json({ error: message }, { status });
 
   if (url.pathname === "/api/sessions") {
     if (method === "GET") return Response.json(await index().list());
@@ -365,7 +491,7 @@ async function handleApi(
         createdAt?: number;
       };
       const id = body.id ?? crypto.randomUUID();
-      if (!UUID.test(id)) return Response.json({ error: "Bad id" }, { status: 400 });
+      if (!SESSION_ID.test(id)) return bad("Bad id");
       return Response.json(
         await index().upsert({
           id,
@@ -374,39 +500,53 @@ async function handleApi(
         })
       );
     }
-    return new Response("Method not allowed", { status: 405 });
+    return bad("Method not allowed", 405);
   }
 
-  const renaming = url.pathname.match(/^\/api\/sessions\/([^/]+)$/);
-  if (renaming && method === "PATCH") {
-    const id = renaming[1];
-    if (!UUID.test(id)) return Response.json({ error: "Bad id" }, { status: 400 });
-    const body = (await request.json().catch(() => ({}))) as { title?: string };
-    const record = await index().rename(id, body.title ?? "");
-    return record
-      ? Response.json(record)
-      : Response.json({ error: "Not found" }, { status: 404 });
+  const entry = url.pathname.match(/^\/api\/sessions\/([^/]+)$/);
+  if (entry) {
+    const id = entry[1];
+    if (!SESSION_ID.test(id)) return bad("Bad id");
+    if (method === "PATCH") {
+      const body = (await request.json().catch(() => ({}))) as { title?: string };
+      const record = await index().rename(id, body.title ?? "");
+      return record ? Response.json(record) : bad("Not found", 404);
+    }
+    if (method === "DELETE") {
+      const { object, branch } = splitSessionId(id);
+      if (branch === null) {
+        await env.PiAgent.getByName(object).destroy();
+        await index().removeObject(object);
+      } else {
+        await index().remove(id);
+      }
+      return Response.json({ deleted: id });
+    }
+    return bad("Method not allowed", 405);
   }
 
-  const session = url.pathname.match(/^\/api\/session\/([^/]+)(\/files|\/file)?$/);
-  if (!session) return undefined;
-  const id = session[1];
+  const match = url.pathname.match(/^\/api\/session\/([^/]+)(\/files|\/file|\/fork|\/state|\/plan)?$/);
+  if (!match) return undefined;
+  const id = match[1];
+  const sub = match[2];
   // 只接受 UUID 格式，避免拿任意字符串去当 DO 名字。
-  if (!UUID.test(id)) return Response.json({ error: "Bad id" }, { status: 400 });
+  if (!UUID.test(id)) return bad("Bad id");
   const agent = env.PiAgent.getByName(id);
+  const session = url.searchParams.get("session") ?? ROOT_SESSION;
+  if (!/^[1-9][0-9]{0,15}$/.test(session)) return bad("Bad session");
 
-  if (session[2] === undefined && method === "DELETE") {
+  if (sub === undefined && method === "DELETE") {
     await agent.destroy();
-    await index().remove(id);
+    await index().removeObject(id);
     return Response.json({ deleted: id });
   }
-  if (session[2] === "/files" && method === "GET") {
+  if (sub === "/files" && method === "GET") {
     const path = url.searchParams.get("path") ?? "/workspace";
     return Response.json(await agent.listFiles(path));
   }
-  if (session[2] === "/file" && method === "GET") {
+  if (sub === "/file" && method === "GET") {
     const path = url.searchParams.get("path");
-    if (!path) return Response.json({ error: "path required" }, { status: 400 });
+    if (!path) return bad("path required");
     const { data, size, truncated } = await agent.readFile(path);
     const name = path.slice(path.lastIndexOf("/") + 1);
     const headers = new Headers({
@@ -422,6 +562,34 @@ async function handleApi(
       );
     }
     return new Response(data.buffer as ArrayBuffer, { headers });
+  }
+  if (sub === "/file" && method === "PUT") {
+    const path = url.searchParams.get("path");
+    if (!path) return bad("path required");
+    const length = Number(request.headers.get("content-length") ?? 0);
+    if (length > MAX_UPLOAD_BYTES) return bad(`File too large (max ${MAX_UPLOAD_BYTES} bytes)`, 413);
+    const data = new Uint8Array(await request.arrayBuffer());
+    if (data.byteLength > MAX_UPLOAD_BYTES) return bad("File too large", 413);
+    return Response.json(await agent.writeFile(path, data));
+  }
+  if (sub === "/fork" && method === "POST") {
+    const branch = await agent.fork(session);
+    const sourceId = session === ROOT_SESSION ? id : `${id}:${session}`;
+    const body = (await request.json().catch(() => ({}))) as { title?: string };
+    const record = await index().upsert({
+      id: `${id}:${branch}`,
+      parent: sourceId,
+      ...(body.title ? { title: body.title } : {})
+    });
+    return Response.json(record);
+  }
+  if (sub === "/state" && method === "GET") {
+    return Response.json(await agent.sessionState(session));
+  }
+  if (sub === "/plan" && method === "POST") {
+    const body = (await request.json().catch(() => ({}))) as { on?: boolean };
+    await agent.setPlanMode(session, body.on === true);
+    return Response.json({ planMode: body.on === true });
   }
   return undefined;
 }

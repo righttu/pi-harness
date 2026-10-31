@@ -14,8 +14,18 @@
 
 import { DurableObject } from "cloudflare:workers";
 
+/**
+ * 一条目录项。
+ *   id      根会话是 DO 的 UUID；分支是 "<uuid>:<pi session id>"。
+ *   object  所属 DO 的 UUID（分支和它的源会话相同）。
+ *   branch  pi session id；根会话为 null。
+ *   parent  分支是从哪条目录项 fork 出来的；根会话为 null。
+ */
 export type SessionRecord = {
   id: string;
+  object: string;
+  branch: string | null;
+  parent: string | null;
   title: string | null;
   createdAt: number;
   updatedAt: number;
@@ -23,6 +33,9 @@ export type SessionRecord = {
 
 type Row = {
   id: string;
+  object: string;
+  branch: string | null;
+  parent: string | null;
   title: string | null;
   created_at: number;
   updated_at: number;
@@ -31,10 +44,21 @@ type Row = {
 function toRecord(row: Row): SessionRecord {
   return {
     id: row.id,
+    object: row.object,
+    branch: row.branch,
+    parent: row.parent,
     title: row.title,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
+}
+
+/** 把目录项 id 拆成 DO 名和 pi session。 */
+export function splitSessionId(id: string): { object: string; branch: string | null } {
+  const colon = id.indexOf(":");
+  return colon === -1
+    ? { object: id, branch: null }
+    : { object: id.slice(0, colon), branch: id.slice(colon + 1) };
 }
 
 export class PiSessionIndex extends DurableObject<Env> {
@@ -51,7 +75,8 @@ export class PiSessionIndex extends DurableObject<Env> {
     super(ctx, env);
     // 建表在构造函数里做，任何 RPC 到达前就绪。
     ctx.blockConcurrencyWhile(async () => {
-      ctx.storage.sql.exec(
+      const sql = ctx.storage.sql;
+      sql.exec(
         `CREATE TABLE IF NOT EXISTS sessions (
            id TEXT PRIMARY KEY,
            title TEXT,
@@ -59,6 +84,16 @@ export class PiSessionIndex extends DurableObject<Env> {
            updated_at INTEGER NOT NULL
          )`
       );
+      // 第二版加的列（分支支持）。旧表没有就补上；object 对旧行等于 id。
+      const columns = new Set(
+        sql.exec<{ name: string }>("PRAGMA table_info(sessions)").toArray().map((c) => c.name)
+      );
+      if (!columns.has("object")) {
+        sql.exec("ALTER TABLE sessions ADD COLUMN object TEXT");
+        sql.exec("UPDATE sessions SET object = id WHERE object IS NULL");
+      }
+      if (!columns.has("branch")) sql.exec("ALTER TABLE sessions ADD COLUMN branch TEXT");
+      if (!columns.has("parent")) sql.exec("ALTER TABLE sessions ADD COLUMN parent TEXT");
     });
   }
 
@@ -78,16 +113,21 @@ export class PiSessionIndex extends DurableObject<Env> {
     id: string;
     title?: string | null;
     createdAt?: number;
+    parent?: string | null;
   }): SessionRecord {
     const now = this.#now();
     const createdAt = input.createdAt ?? now;
+    const { object, branch } = splitSessionId(input.id);
     this.ctx.storage.sql.exec(
-      `INSERT INTO sessions (id, title, created_at, updated_at)
-       VALUES (?1, ?2, ?3, ?4)
+      `INSERT INTO sessions (id, object, branch, parent, title, created_at, updated_at)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
        ON CONFLICT(id) DO UPDATE SET
          title = COALESCE(excluded.title, sessions.title),
          updated_at = excluded.updated_at`,
       input.id,
+      object,
+      branch,
+      input.parent ?? null,
       input.title ?? null,
       createdAt,
       now
@@ -117,6 +157,11 @@ export class PiSessionIndex extends DurableObject<Env> {
 
   remove(id: string): void {
     this.ctx.storage.sql.exec("DELETE FROM sessions WHERE id = ?1", id);
+  }
+
+  /** 删掉一个 DO 的根会话和它所有分支（DO 本身被 destroy 时用）。 */
+  removeObject(object: string): void {
+    this.ctx.storage.sql.exec("DELETE FROM sessions WHERE object = ?1", object);
   }
 
   private get(id: string): SessionRecord | undefined {

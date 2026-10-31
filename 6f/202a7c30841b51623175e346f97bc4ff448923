@@ -1,0 +1,29 @@
+env.d.ts
+  s_6f18dd121ce268::t_b8de58b97e3c11 2,7,12
+src/server.ts
+  s_6f18dd121ce268::t_b33d4ecc8c7246 14,20,334
+src/sessions.ts
+  s_6f18dd121ce268::t_98c8021a879aa4 8,40
+src/tests/sessions.test.ts
+  s_6f18dd121ce268::t_eaff00c716efe2 5,7
+src/tests/worker.ts
+  s_6f18dd121ce268::t_7dd8723c005261 30,33
+src/tests/wrangler.jsonc
+  s_6f18dd121ce268::t_69bfaddfa9a393 10,15
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "6f202a7c30841b51623175e346f97bc4ff448923",
+  "prompts": {},
+  "sessions": {
+    "s_6f18dd121ce268": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_e73ba4895ffegcjq23ifMtMG44",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    }
+  }
+}

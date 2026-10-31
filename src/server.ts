@@ -49,7 +49,8 @@ export class PiAgent extends DurableObject<Env> {
         tools: createWorkspaceTools(this.workspace)
       });
       const models = createModels();
-      models.setProvider(this.ai.provider);
+      //models.setProvider(this.ai.provider);
+      const base = this.ai.provider; const route = this.ai(MODEL_ID); models.setProvider({ ...base, getModels: () => [...base.getModels(), route], getAllModels: () => [...(base.getAllModels?.() ?? base.getModels()), route] });
       return Harness.open(
         storage,
         {

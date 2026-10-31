@@ -19,6 +19,7 @@ import {
   PlusIcon,
   StopIcon,
   SunIcon,
+  TrashIcon,
   WrenchIcon,
   XCircleIcon,
   XIcon
@@ -56,13 +57,74 @@ const SUGGESTIONS = [
   }
 ] satisfies Array<{ icon: ReactNode; label: string; value: string }>;
 
-function getSession(): string {
-  const existing = localStorage.getItem(SESSION_KEY);
-  if (existing) return existing;
-  const created = crypto.randomUUID();
-  localStorage.setItem(SESSION_KEY, created);
-  return created;
+// ============================================================================
+// 会话列表（多会话支持）
+//
+// 一个"会话" = 一个 Durable Object，名字就是这里的 UUID。
+// 以前 localStorage 只存一个当前 UUID（SESSION_KEY），点 + 就把它覆盖掉，
+// 旧会话的 DO 还在，但浏览器找不回去了。
+// 现在改为：
+//   - SESSIONS_KEY 存一个数组 [{ id, createdAt }]，是你所有会话的目录；
+//   - SESSION_KEY 仍然存"当前选中的那个"，保持和旧版本兼容；
+//   - 第一次升级时，把旧的单个 UUID 自动迁移进列表。
+// ============================================================================
+
+const SESSIONS_KEY = "pi-harness-sessions";
+
+type SessionEntry = { id: string; createdAt: number };
+
+/** 读取会话目录；不存在或损坏则返回空数组。 */
+function loadSessions(): SessionEntry[] {
+  try {
+    const raw = localStorage.getItem(SESSIONS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (s): s is SessionEntry =>
+        typeof s === "object" &&
+        s !== null &&
+        typeof (s as SessionEntry).id === "string" &&
+        typeof (s as SessionEntry).createdAt === "number"
+    );
+  } catch {
+    return [];
+  }
 }
+
+function saveSessions(sessions: SessionEntry[]): void {
+  localStorage.setItem(SESSIONS_KEY, JSON.stringify(sessions));
+}
+
+/**
+ * 启动时决定"当前会话"和"会话目录"。
+ * 兼容旧版：如果目录为空但旧的单个 UUID 还在，就把它收进目录。
+ */
+function initSessions(): { current: string; sessions: SessionEntry[] } {
+  let sessions = loadSessions();
+  const legacy = localStorage.getItem(SESSION_KEY);
+  if (legacy && !sessions.some((s) => s.id === legacy)) {
+    sessions = [{ id: legacy, createdAt: Date.now() }, ...sessions];
+  }
+  if (sessions.length === 0) {
+    sessions = [{ id: crypto.randomUUID(), createdAt: Date.now() }];
+  }
+  saveSessions(sessions);
+  const current =
+    legacy && sessions.some((s) => s.id === legacy) ? legacy : sessions[0].id;
+  localStorage.setItem(SESSION_KEY, current);
+  return { current, sessions };
+}
+
+/** 列表里显示的名字：UUID 前 8 位 + 创建时间。 */
+function sessionLabel(entry: SessionEntry): string {
+  const when = new Date(entry.createdAt);
+  const time = `${when.getMonth() + 1}/${when.getDate()} ${String(
+    when.getHours()
+  ).padStart(2, "0")}:${String(when.getMinutes()).padStart(2, "0")}`;
+  return `${entry.id.slice(0, 8)} · ${time}`;
+}
+// ============================================================================
 
 function ModeToggle() {
   const [mode, setMode] = useState(
@@ -373,7 +435,21 @@ function Sidebar({
 }
 
 function App() {
-  const [session, setSession] = useState(getSession);
+  // ==========================================================================
+  // 会话状态：当前会话 id + 会话目录。两者都同步写回 localStorage。
+  // ==========================================================================
+  const [initial] = useState(initSessions);
+  const [session, setSessionState] = useState(initial.current);
+  const [sessions, setSessions] = useState<SessionEntry[]>(initial.sessions);
+  const [deleting, setDeleting] = useState(false);
+
+  /** 切换当前会话（也会记进 localStorage，刷新后还是它）。 */
+  const setSession = (id: string) => {
+    localStorage.setItem(SESSION_KEY, id);
+    setSessionState(id);
+  };
+  // ==========================================================================
+
   const [prompt, setPrompt] = useState("");
   const [toolsOpen, setToolsOpen] = useState(
     () => window.matchMedia("(min-width: 1100px)").matches
@@ -408,11 +484,49 @@ function App() {
     submitPrompt(text, whenBusy);
   };
 
+  // ==========================================================================
+  // 新建 / 删除会话
+  // ==========================================================================
+
+  /** 新建：生成一个新 UUID，加进目录顶部，并切换过去。旧会话保留。 */
   const newSession = () => {
-    const next = crypto.randomUUID();
-    localStorage.setItem(SESSION_KEY, next);
-    setSession(next);
+    const entry: SessionEntry = { id: crypto.randomUUID(), createdAt: Date.now() };
+    const next = [entry, ...sessions];
+    setSessions(next);
+    saveSessions(next);
+    setSession(entry.id);
   };
+
+  /**
+   * 删除当前会话：
+   *   1. 先切到另一个会话（没有就新建一个），让 WebSocket 不再连着要删的 DO；
+   *   2. 从目录里移除；
+   *   3. 调 DELETE /api/session/<id>，服务端把那个 DO 的数据全部删掉。
+   */
+  const deleteSession = async () => {
+    const target = session;
+    if (!window.confirm(`删除会话 ${target.slice(0, 8)}？对话记录和工作区文件会一起删除，不可恢复。`)) {
+      return;
+    }
+    setDeleting(true);
+    try {
+      const remaining = sessions.filter((s) => s.id !== target);
+      let next = remaining;
+      if (next.length === 0) {
+        next = [{ id: crypto.randomUUID(), createdAt: Date.now() }];
+      }
+      setSessions(next);
+      saveSessions(next);
+      setSession(next[0].id);
+      const response = await fetch(`/api/session/${target}`, { method: "DELETE" });
+      if (!response.ok) {
+        console.error("delete session failed", response.status, await response.text());
+      }
+    } finally {
+      setDeleting(false);
+    }
+  };
+  // ==========================================================================
 
   const empty = messages.length === 0 && !live && !running;
 
@@ -433,9 +547,21 @@ function App() {
               </div>
               <div className="min-w-0">
                 <h1 className="truncate text-base font-semibold">Pi harness</h1>
-                <p className="truncate text-xs text-kumo-subtle">
-                  Session <code>{session.slice(0, 8)}</code>
-                </p>
+                {/* ============================================================
+                    会话选择器：下拉列出所有会话，选中即切换。
+                    ============================================================ */}
+                <select
+                  aria-label="Switch session"
+                  value={session}
+                  onChange={(event) => setSession(event.target.value)}
+                  className="max-w-[220px] truncate rounded border border-kumo-line bg-kumo-base px-1.5 py-0.5 text-xs text-kumo-subtle"
+                >
+                  {sessions.map((entry) => (
+                    <option key={entry.id} value={entry.id}>
+                      {sessionLabel(entry)}
+                    </option>
+                  ))}
+                </select>
               </div>
             </div>
             <div className="flex shrink-0 items-center gap-1.5">
@@ -463,6 +589,15 @@ function App() {
                 aria-label="New session"
                 onClick={newSession}
                 icon={<PlusIcon size={16} />}
+              />
+              {/* 删除当前会话（连同服务端数据） */}
+              <Button
+                variant="ghost"
+                shape="square"
+                aria-label="Delete session"
+                disabled={deleting}
+                onClick={deleteSession}
+                icon={<TrashIcon size={16} />}
               />
               <ModeToggle />
             </div>

@@ -13,8 +13,23 @@ commit 哈希对应 GitHub `righttu/pi-harness` 的提交。
   - 模型能力：`PI_MODEL_INPUT`（`text` 或 `text,image`，默认 text）、`PI_CONTEXT_WINDOW`（默认 128000）、
     `PI_MAX_TOKENS`（默认 8192）、`PI_MODEL_REASONING`（`true`/`false`）
   - 可选：`PI_SIDE_ROUTE`（子代理走的路由名）、`PI_PRICE_INPUT` / `PI_PRICE_OUTPUT`（美元/百万 token）、
-    `PI_PUBLIC_URL`（站点根，分享链接用）、`PI_SHARE_SECRET`（Secret，分享链接签名；不设用 CF_AIG_TOKEN）
+    `PI_PUBLIC_URL`（站点根，分享链接用）、`PI_SHARE_SECRET`（Secret，分享链接签名；不设用 CF_AIG_TOKEN）、
+    `PI_FETCH_ALLOW`（fetch 工具域名白名单，逗号分隔，默认 `*`）
 - **R2 桶**：`pi-files`。`shared/` 放发布的文件；`mount/` 下的对象只读挂到每个工作区的 `/workspace/r2`。
+
+---
+
+## 未发布 — 上传/下载流式、fetch 工具
+
+### 上传 / 下载改流式
+- `readFile` / `writeFile` RPC 直接传 `ReadableStream`（Workers RPC 原生支持，带流控，不受 32 MiB 限制）。文件不再进内存。
+- 去掉下载 8 MiB、上传 20 MiB 上限。预览仍只取前 2 MiB（浏览器内联显示用）；点下载给整个文件。
+- 单文件保留 512 MiB 防呆上限——工作区是 SQLite，真正的大文件应走 publish 到 R2。
+
+### fetch 工具（`src/fetch-tool.ts`）
+- 模型可以发 HTTP 请求：GET/POST/PUT/HEAD，返回状态、content-type 和正文。HTML 去标签只留文字；正文最多 64 KiB。
+- `savePath` 参数：响应体直接流进工作区文件（下载 PDF、zip、数据集），不返回内联内容。
+- 域名白名单 `PI_FETCH_ALLOW`（后缀匹配，默认 `*`）。超时 30 秒。只允许 http(s)。
 
 ---
 

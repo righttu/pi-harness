@@ -18,6 +18,7 @@ import { routeAgentRequest } from "agents";
 import { PiHarness, ROOT_SESSION } from "agents/harness/pi";
 import { Lifecycle } from "agents/lifecycle";
 import { WebSockets } from "agents/websockets";
+import { createFetchTool, parseAllowList } from "./fetch-tool";
 import { createPublish, publishFile, verifyShare, type PublishDeps } from "./publish";
 import { PiSessionIndex, splitSessionId } from "./sessions";
 import { PiSessionSockets } from "./sockets";
@@ -65,6 +66,8 @@ const R2_MOUNT_MAX_BYTES = 64 * 1024 * 1024;
  *   PI_MAX_TOKENS       单次回答最长 token 数。默认 8192。
  *   PI_MODEL_REASONING  "true" 表示模型支持 reasoning。默认 false。
  *
+ *   PI_FETCH_ALLOW  可选。fetch 工具允许访问的主机名，逗号分隔，后缀匹配；
+ *                   "*" 放行全部。默认 "*"。对外开放时建议收紧。
  *   PI_PUBLIC_URL   可选。站点根（https://pi-agent.example.com），publish 生成
  *                   链接用。不设就用最近一次连上来的请求的 origin。
  *   PI_SHARE_SECRET 可选。分享链接的签名密钥（Secret）。不设用 CF_AIG_TOKEN。
@@ -81,6 +84,7 @@ type GatewayEnv = {
   PI_MODEL_REASONING?: string;
   PI_PUBLIC_URL?: string;
   PI_SHARE_SECRET?: string;
+  PI_FETCH_ALLOW?: string;
 };
 
 /** 从变量读出来的模型能力。 */
@@ -127,8 +131,8 @@ export type FileEntry = {
   kind: "dir" | "file" | "link";
 };
 
-/** 文件预览/下载最多取这么多字节；再大的文件让模型用 exec 处理。 */
-const MAX_PREVIEW_BYTES = 8 * 1024 * 1024;
+/** 浏览器里内联预览最多取这么多字节（整个文件下载不受此限）。 */
+const PREVIEW_BYTES = 2 * 1024 * 1024;
 
 /** 只允许 /workspace 下的绝对路径，去掉 .. 和重复的斜杠。 */
 function normalizeWorkspacePath(input: string): string {
@@ -151,8 +155,9 @@ function normalizeWorkspacePath(input: string): string {
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** 目录项 id：UUID，或 "UUID:<pi session id>"（分支）。 */
 const SESSION_ID = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?::([1-9][0-9]{0,15}))?$/i;
-/** 上传上限。RPC 参数一次传完，再大就该走 R2 了。 */
-const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+/** 单个工作区文件的上限。工作区整体受 DO 存储上限约束（付费 10 GB），这里
+ * 只是防呆：真正的大文件应该走 R2（publish）。 */
+const MAX_UPLOAD_BYTES = 512 * 1024 * 1024;
 
 /**
  * 会话目录属于谁。接了 Cloudflare Access 后这个头是登录邮箱；没接就是
@@ -190,7 +195,7 @@ function contentTypeOf(path: string): string {
 // 系统提示。前半段说有什么；后半段是工作方式约束——模型（尤其是 Qwen 这类）
 // 不会自己遵守这些隐含规范，写明了才稳定。
 // ============================================================================
-const PREAMBLE = `You are a concise playground assistant. You have a durable workspace at /workspace: read, write, edit, delete, list (ls), find and grep files there, and run JavaScript modules in it with exec, which can also use git. Paths are absolute. Use tools whenever they can answer the request, and explain their results plainly.
+const PREAMBLE = `You are a concise playground assistant. You have a durable workspace at /workspace: read, write, edit, delete, list (ls), find and grep files there, and run JavaScript modules in it with exec, which can also use git. You can reach the web with fetch (save large or binary responses to a file with savePath). Paths are absolute. Use tools whenever they can answer the request, and explain their results plainly.
 
 How to work:
 - Look before you act: ls or find the relevant directory before guessing paths.
@@ -322,7 +327,12 @@ export class PiAgent extends DurableObject<Env> {
         removeInChild: [subagent, subagents]
       });
       const publish = createPublish(this.publishDeps);
-      for (const extension of [subagent, subagents, review, publish, ReviewerRole, Plan]) {
+      const web = createFetchTool({
+        workspace: this.workspace,
+        allow: parseAllowList(gatewayEnv.PI_FETCH_ALLOW),
+        normalizePath: normalizeWorkspacePath
+      });
+      for (const extension of [subagent, subagents, review, publish, web, ReviewerRole, Plan]) {
         this.registry.install(extension);
       }
       // ======================================================================
@@ -330,7 +340,7 @@ export class PiAgent extends DurableObject<Env> {
       // 用户打开 plan mode 时加到主对话上（见 setPlanMode）。不写这一条，
       // "默认"就是全部已安装扩展，Plan 的系统提示会一直生效。
       // ======================================================================
-      const defaultExtensions = [playground, subagent, subagents, review, publish];
+      const defaultExtensions = [playground, subagent, subagents, review, publish, web];
       const gateway = createProvider({
         id: PROVIDER_ID,
         name: "Cloudflare AI Gateway",
@@ -454,30 +464,34 @@ export class PiAgent extends DurableObject<Env> {
       );
   }
 
-  /** 读文件的前 maxBytes 字节。返回 bytes 让 Worker 决定 content-type。 */
+  /**
+   * 读文件，返回流。Workers RPC 会把流带流控地传给 Worker，再传给浏览器，
+   * 整个过程不进内存，文件多大都行。`maxBytes` 给预览用：只取前面一段。
+   */
   async readFile(
     path: string,
-    maxBytes = MAX_PREVIEW_BYTES
-  ): Promise<{ data: Uint8Array; size: number; truncated: boolean }> {
+    maxBytes?: number
+  ): Promise<{ stream: ReadableStream<Uint8Array>; size: number; truncated: boolean }> {
     const file = normalizeWorkspacePath(path);
     const stat = await this.workspace.fs.stat(file);
     if (!stat.isFile) throw new Error(`Not a file: ${file}`);
-    const stream = await this.workspace.fs.readFile(file, {
-      byteOffset: 0,
-      byteLength: Math.min(stat.size, maxBytes)
-    });
-    const data = new Uint8Array(await new Response(stream).arrayBuffer());
-    return { data, size: stat.size, truncated: stat.size > data.byteLength };
+    const byteLength = maxBytes === undefined ? stat.size : Math.min(stat.size, maxBytes);
+    const stream = await this.workspace.fs.readFile(file, { byteOffset: 0, byteLength });
+    return { stream, size: stat.size, truncated: byteLength < stat.size };
   }
 
-  /** 上传：写一个文件（覆盖）。目录不存在就建。 */
-  async writeFile(path: string, data: Uint8Array): Promise<{ path: string; size: number }> {
+  /** 上传：从流写一个文件（覆盖）。目录不存在就建。同样不进内存。 */
+  async writeFile(
+    path: string,
+    body: ReadableStream<Uint8Array>
+  ): Promise<{ path: string; size: number }> {
     const file = normalizeWorkspacePath(path);
     if (file === "/workspace") throw new Error("Path is a directory");
     const dir = file.slice(0, file.lastIndexOf("/"));
     await this.workspace.fs.mkdir(dir, { recursive: true });
-    await this.workspace.fs.writeFile(file, data);
-    return { path: file, size: data.byteLength };
+    await this.workspace.fs.writeFile(file, body);
+    const stat = await this.workspace.fs.stat(file);
+    return { path: file, size: stat.size };
   }
 
   // ==========================================================================
@@ -664,7 +678,12 @@ async function handleApi(
   if (sub === "/file" && method === "GET") {
     const path = url.searchParams.get("path");
     if (!path) return bad("path required");
-    const { data, size, truncated } = await agent.readFile(path);
+    const download = url.searchParams.get("download") === "1";
+    // 预览只取开头一段；下载给整个文件。
+    const { stream, size, truncated } = await agent.readFile(
+      path,
+      download ? undefined : PREVIEW_BYTES
+    );
     const name = path.slice(path.lastIndexOf("/") + 1);
     const headers = new Headers({
       "content-type": contentTypeOf(path),
@@ -672,22 +691,22 @@ async function handleApi(
       "x-file-truncated": String(truncated),
       "cache-control": "no-store"
     });
-    if (url.searchParams.get("download") === "1") {
+    if (download) {
+      headers.set("content-length", String(size));
       headers.set(
         "content-disposition",
         `attachment; filename*=UTF-8''${encodeURIComponent(name)}`
       );
     }
-    return new Response(data.buffer as ArrayBuffer, { headers });
+    return new Response(stream, { headers });
   }
   if (sub === "/file" && method === "PUT") {
     const path = url.searchParams.get("path");
     if (!path) return bad("path required");
+    if (!request.body) return bad("body required");
     const length = Number(request.headers.get("content-length") ?? 0);
     if (length > MAX_UPLOAD_BYTES) return bad(`File too large (max ${MAX_UPLOAD_BYTES} bytes)`, 413);
-    const data = new Uint8Array(await request.arrayBuffer());
-    if (data.byteLength > MAX_UPLOAD_BYTES) return bad("File too large", 413);
-    return Response.json(await agent.writeFile(path, data));
+    return Response.json(await agent.writeFile(path, request.body));
   }
   if (sub === "/fork" && method === "POST") {
     const branch = await agent.fork(session);

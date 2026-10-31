@@ -11,13 +11,13 @@ import { routeAgentRequest } from "agents";
 import { PiHarness } from "agents/harness/pi";
 import { Lifecycle } from "agents/lifecycle";
 import { WebSockets } from "agents/websockets";
-import { SessionIndex } from "./sessions";
+import { PiSessionIndex } from "./sessions";
 import { PiSessionSockets } from "./sockets";
 import { Subagent } from "./subagent";
 import { SubagentsExtension } from "./subagents";
 import { createWorkspaceTools, JAVASCRIPT_BACKEND } from "./workspace";
 
-export { SessionIndex };
+export { PiSessionIndex };
 
 // AI Gateway 的名字和动态路由的名字。换模型只改路由配置，不改这里。
 const GATEWAY_ID = "pi-gateway";
@@ -331,7 +331,7 @@ async function handleApi(
   env: Env
 ): Promise<Response | undefined> {
   const { method } = request;
-  const index = () => env.SessionIndex.getByName(ownerOf(request));
+  const index = () => env.PiSessionIndex.getByName(ownerOf(request));
 
   if (url.pathname === "/api/sessions") {
     if (method === "GET") return Response.json(await index().list());

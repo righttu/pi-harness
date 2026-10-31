@@ -2,9 +2,9 @@ import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 
 /** 会话目录 Durable Object（src/sessions.ts）。 */
-describe("SessionIndex", () => {
+describe("PiSessionIndex", () => {
   it("registers, renames, orders by last update, and removes sessions", async () => {
-    const index = env.SessionIndex.getByName(`owner-${crypto.randomUUID()}`);
+    const index = env.PiSessionIndex.getByName(`owner-${crypto.randomUUID()}`);
     expect(await index.list()).toEqual([]);
 
     const a = await index.upsert({ id: crypto.randomUUID(), createdAt: 1000 });

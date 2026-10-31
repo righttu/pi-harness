@@ -25,11 +25,14 @@
       },
       {
         // 会话目录（每个用户一个实例），见 src/sessions.ts
-        "name": "SessionIndex",
-        "class_name": "SessionIndex"
+        "name": "PiSessionIndex",
+        "class_name": "PiSessionIndex"
       }
     ]
   },
+  // 命名规则：所有组件（Worker、DO 类、绑定）以 pi 开头。
+  // 迁移只能追加，不能改历史条目：v2 建了 SessionIndex，v3 把它改名。
+  // 不管 v2 有没有部署过，wrangler 都会按顺序补齐到 v3。
   "migrations": [
     {
       "tag": "v1",
@@ -38,6 +41,10 @@
     {
       "tag": "v2",
       "new_sqlite_classes": ["SessionIndex"]
+    },
+    {
+      "tag": "v3",
+      "renamed_classes": [{ "from": "SessionIndex", "to": "PiSessionIndex" }]
     }
   ],
   "observability": {

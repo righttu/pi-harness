@@ -5,7 +5,7 @@
 // 服务端，浏览器只缓存一份。
 //
 // "这个用户"是谁：Worker 用 Cloudflare Access 注入的
-// `Cf-Access-Authenticated-User-Email` 头做 owner，一个 owner 一个 SessionIndex
+// `Cf-Access-Authenticated-User-Email` 头做 owner，一个 owner 一个 PiSessionIndex
 // 实例。没有接 Access 时所有人共用 "public" 这一个目录（和现在"知道 URL 就能
 // 用"的信任模型一致）。接上 Access 后不用改代码，每个人自动看到自己的列表。
 //
@@ -37,7 +37,7 @@ function toRecord(row: Row): SessionRecord {
   };
 }
 
-export class SessionIndex extends DurableObject<Env> {
+export class PiSessionIndex extends DurableObject<Env> {
   /** 上一次写入用的时间戳；同一毫秒内的两次写入也要分得出先后。 */
   #last = 0;
 

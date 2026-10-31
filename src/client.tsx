@@ -1777,6 +1777,16 @@ function App() {
           </div>
         ) : null}
 
+        {/* Plan mode 开着、计划还没出来：提示一下，免得不确定开关有没有生效。 */}
+        {planMode && (!sessionState || sessionState.plan.length === 0 || running) ? (
+          <div className="shrink-0 border-t border-kumo-line bg-kumo-base">
+            <div className="mx-auto flex max-w-3xl items-center gap-2 px-5 pt-3 text-xs text-kumo-subtle">
+              <ListChecksIcon size={14} className="text-kumo-accent" />
+              Plan mode：模型只能读文件和提交计划，不会改任何东西。描述任务，等它提交计划。
+            </div>
+          </div>
+        ) : null}
+
         {/* Plan mode 下模型提交了计划：列出来，让用户决定执行还是改。 */}
         {planMode && sessionState && sessionState.plan.length > 0 && !running ? (
           <div className="shrink-0 border-t border-kumo-line bg-kumo-base">

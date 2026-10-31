@@ -325,6 +325,9 @@ export class PiAgent extends DurableObject<Env> {
 
   /** Host startup, after the harness has opened pi. */
   async onStart(): Promise<void> {
+    // 新对象的工作区是空的，连 /workspace 目录都没有；模型第一步 ls 就会
+    // 报 "no such path"。这里先建好。mkdir recursive 对已存在的目录是 no-op。
+    await this.workspace.fs.mkdir("/workspace", { recursive: true });
     await this.sockets.reattach();
   }
 

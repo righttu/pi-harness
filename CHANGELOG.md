@@ -19,7 +19,7 @@ commit 哈希对应 GitHub `righttu/pi-harness` 的提交。
 
 ---
 
-## 未发布 — 上传/下载流式、fetch 工具
+## d5db29b — 2026-10-31 — 上传/下载流式、fetch 工具
 
 ### 上传 / 下载改流式
 - `readFile` / `writeFile` RPC 直接传 `ReadableStream`（Workers RPC 原生支持，带流控，不受 32 MiB 限制）。文件不再进内存。

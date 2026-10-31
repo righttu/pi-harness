@@ -27,7 +27,10 @@ import {
 } from "agents/harness/pi";
 import { Lifecycle } from "agents/lifecycle";
 import { WebSockets } from "agents/websockets";
+import { SessionIndex } from "../sessions";
 import { PiSessionSockets } from "../sockets";
+
+export { SessionIndex };
 import { EMPTY_VIEW, reduceEvents } from "../view";
 import { createWorkspaceTools, JAVASCRIPT_BACKEND } from "../workspace";
 

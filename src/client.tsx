@@ -9,10 +9,15 @@ import {
 } from "@cloudflare/kumo";
 import {
   ArrowDownIcon,
+  ArrowsClockwiseIcon,
   BrainIcon,
+  CaretLeftIcon,
   CheckCircleIcon,
   CodeIcon,
+  DownloadSimpleIcon,
+  FileIcon,
   FilePlusIcon,
+  FolderIcon,
   GearIcon,
   GitBranchIcon,
   MoonIcon,
@@ -23,6 +28,7 @@ import {
   StopIcon,
   SunIcon,
   TrashIcon,
+  UsersThreeIcon,
   WrenchIcon,
   XCircleIcon,
   XIcon
@@ -65,18 +71,62 @@ const SUGGESTIONS = [
 // 会话列表（多会话支持）
 //
 // 一个"会话" = 一个 Durable Object，名字就是这里的 UUID。
-// 以前 localStorage 只存一个当前 UUID（SESSION_KEY），点 + 就把它覆盖掉，
-// 旧会话的 DO 还在，但浏览器找不回去了。
-// 现在改为：
-//   - SESSIONS_KEY 存一个数组 [{ id, createdAt }]，是你所有会话的目录；
-//   - SESSION_KEY 仍然存"当前选中的那个"，保持和旧版本兼容；
-//   - 第一次升级时，把旧的单个 UUID 自动迁移进列表。
+//
+// 目录的"真相"在服务端（GET/POST/PATCH /api/sessions，见 server.ts 和
+// sessions.ts），换浏览器也找得回来。localStorage 里留一份缓存：
+//   - SESSIONS_KEY：目录缓存，首屏先用它渲染，服务端回来后替换；
+//   - SESSION_KEY：当前选中的那个；
+//   - 第一次升级时，把本地目录里服务端没有的会话 POST 上去（迁移）。
 // ============================================================================
 
 const SESSIONS_KEY = "pi-harness-sessions";
 
-/** `title` 是用户改的名字，或者从第一条消息自动取的；没有就显示 id + 时间。 */
+/** `title` 是用户改的名字，或者从第一条消息自动取的；没有就显示 id。 */
 type SessionEntry = { id: string; createdAt: number; title?: string };
+
+/** 服务端目录项（src/sessions.ts 的 SessionRecord）。 */
+type SessionRecord = {
+  id: string;
+  title: string | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
+function fromRecord(record: SessionRecord): SessionEntry {
+  return {
+    id: record.id,
+    createdAt: record.createdAt,
+    ...(record.title ? { title: record.title } : {})
+  };
+}
+
+async function fetchJson<T>(input: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(input, {
+    ...init,
+    headers: { "content-type": "application/json", ...(init?.headers ?? {}) }
+  });
+  if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
+  return (await response.json()) as T;
+}
+
+const sessionsApi = {
+  list: () => fetchJson<SessionRecord[]>("/api/sessions"),
+  register: (entry: SessionEntry) =>
+    fetchJson<SessionRecord>("/api/sessions", {
+      method: "POST",
+      body: JSON.stringify({
+        id: entry.id,
+        createdAt: entry.createdAt,
+        ...(entry.title ? { title: entry.title } : {})
+      })
+    }),
+  rename: (id: string, title: string) =>
+    fetchJson<SessionRecord>(`/api/sessions/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ title })
+    }),
+  remove: (id: string) => fetchJson<{ deleted: string }>(`/api/session/${id}`, { method: "DELETE" })
+};
 
 /** 读取会话目录；不存在或损坏则返回空数组。 */
 function loadSessions(): SessionEntry[] {
@@ -513,10 +563,52 @@ function AssistantPart({
   }
 }
 
+/**
+ * 后台子代理的报告以用户消息的形式进入父对话（见 src/subagents.ts 的
+ * Reporter），形如 "[subagent reader answered, no reply needed] ..."。
+ * 和 subagents.ts 的 SUBAGENT_REPORT 保持一致；不直接 import 那个文件，
+ * 免得把 pi-durable 打进浏览器包。
+ */
+const SUBAGENT_REPORT = /^\[subagent (\S+) ([^\]]*)\] ?([\s\S]*)$/;
+
+function SubagentReport({ name, status, body }: { name: string; status: string; body: string }) {
+  const failed = status.startsWith("failed");
+  return (
+    <div className="flex items-start gap-3">
+      <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-kumo-elevated text-kumo-subtle ring ring-kumo-line">
+        <UsersThreeIcon size={17} />
+      </div>
+      <details className="min-w-0 flex-1 rounded-xl border border-kumo-line bg-kumo-base" open>
+        <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5">
+          <GitBranchIcon size={14} className="text-kumo-subtle" />
+          <span className="min-w-0 flex-1 truncate text-xs">
+            <span className="font-semibold">Subagent {name}</span>
+            <span className="ml-2 text-kumo-subtle">{failed ? status : "reported"}</span>
+          </span>
+          <Badge variant={failed ? "destructive" : "secondary"}>
+            {failed ? "Failed" : "Report"}
+          </Badge>
+        </summary>
+        {body ? (
+          <div className="border-t border-kumo-line px-3 py-3">
+            <Streamdown className="sd-theme text-sm leading-6" plugins={{ code }} controls={false}>
+              {body}
+            </Streamdown>
+          </div>
+        ) : null}
+      </details>
+    </div>
+  );
+}
+
 function UserMessage({ message }: { message: TranscriptMessage }) {
   const text = message.parts
     .map((part) => (part.type === "text" ? part.text : ""))
     .join("");
+  const report = SUBAGENT_REPORT.exec(text);
+  if (report) {
+    return <SubagentReport name={report[1]} status={report[2]} body={report[3] ?? ""} />;
+  }
   return (
     <div className="flex justify-end">
       <div className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-kumo-contrast px-4 py-2.5 text-sm leading-relaxed text-kumo-inverse">
@@ -613,50 +705,309 @@ function Message({
   }
 }
 
-function Sidebar({
+function ToolsPanel({
   tools,
-  activeTools,
-  onClose
+  activeTools
 }: {
   tools: readonly ToolInfo[];
   activeTools: readonly string[];
-  onClose: () => void;
 }) {
   return (
-    <aside
-      className="flex min-h-0 flex-col border-l border-kumo-line bg-kumo-base"
-      aria-label="Tools"
-    >
-      <div className="flex h-[68px] shrink-0 items-center justify-between gap-2 border-b border-kumo-line px-4">
-        <Text size="sm" bold>
-          Tools
-        </Text>
+    <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
+      {tools.map((tool) => (
+        <Surface key={tool.name} className="rounded-lg p-3 ring ring-kumo-line">
+          <div className="flex items-center gap-2">
+            {activeTools.includes(tool.name) ? (
+              <GearIcon size={14} className="animate-spin text-kumo-accent" />
+            ) : (
+              <WrenchIcon size={14} className="text-kumo-inactive" />
+            )}
+            <code className="text-xs font-semibold">{tool.name}</code>
+          </div>
+          <p className="mt-1 text-xs text-kumo-subtle">{tool.description}</p>
+        </Surface>
+      ))}
+    </div>
+  );
+}
+
+// ============================================================================
+// 文件面板：浏览当前会话的 /workspace，点文件预览，可下载。
+// 数据来自 GET /api/session/<id>/files 和 /file（见 server.ts）。
+// 一轮运行结束时自动刷新一次，因为模型刚才可能写了文件。
+// ============================================================================
+
+type FileEntry = {
+  name: string;
+  path: string;
+  size: number;
+  mtime: number;
+  kind: "dir" | "file" | "link";
+};
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+const TEXT_TYPES = /^(text\/|application\/(json|javascript|xml))/;
+const IMAGE_TYPES = /^image\//;
+
+function FilePreview({
+  session,
+  path,
+  onClose
+}: {
+  session: string;
+  path: string;
+  onClose: () => void;
+}) {
+  const [state, setState] = useState<
+    | { kind: "loading" }
+    | { kind: "text"; text: string; truncated: boolean; size: number }
+    | { kind: "image"; url: string }
+    | { kind: "binary"; size: number; type: string }
+    | { kind: "error"; message: string }
+  >({ kind: "loading" });
+  const url = `/api/session/${session}/file?path=${encodeURIComponent(path)}`;
+
+  useEffect(() => {
+    let cancelled = false;
+    setState({ kind: "loading" });
+    (async () => {
+      try {
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
+        const type = response.headers.get("content-type") ?? "";
+        const size = Number(response.headers.get("x-file-size") ?? 0);
+        const truncated = response.headers.get("x-file-truncated") === "true";
+        if (TEXT_TYPES.test(type)) {
+          const text = await response.text();
+          if (!cancelled) setState({ kind: "text", text, truncated, size });
+        } else if (IMAGE_TYPES.test(type)) {
+          if (!cancelled) setState({ kind: "image", url });
+        } else if (!cancelled) {
+          setState({ kind: "binary", size, type });
+        }
+      } catch (cause) {
+        if (!cancelled) {
+          setState({ kind: "error", message: cause instanceof Error ? cause.message : String(cause) });
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [url]);
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex shrink-0 items-center gap-1 border-b border-kumo-line px-2 py-1.5">
         <Button
           variant="ghost"
           shape="square"
-          aria-label="Close tools"
+          size="sm"
+          aria-label="Back to file list"
+          onClick={onClose}
+          icon={<CaretLeftIcon size={14} />}
+        />
+        <code className="min-w-0 flex-1 truncate text-xs" title={path}>
+          {path.replace(/^\/workspace\/?/, "")}
+        </code>
+        <a
+          href={`${url}&download=1`}
+          download
+          className="rounded p-1.5 text-kumo-subtle hover:bg-kumo-elevated"
+          aria-label="Download"
+          title="Download"
+        >
+          <DownloadSimpleIcon size={14} />
+        </a>
+      </div>
+      <div className="min-h-0 flex-1 overflow-auto p-3">
+        {state.kind === "loading" ? (
+          <p className="text-xs text-kumo-subtle">Loading…</p>
+        ) : state.kind === "error" ? (
+          <p className="text-xs text-kumo-danger">{state.message}</p>
+        ) : state.kind === "image" ? (
+          <img src={state.url} alt={path} className="max-w-full rounded-lg" />
+        ) : state.kind === "binary" ? (
+          <p className="text-xs text-kumo-subtle">
+            {state.type || "binary"} · {formatSize(state.size)}. No preview; use Download.
+          </p>
+        ) : (
+          <>
+            {state.truncated ? (
+              <p className="mb-2 text-[10px] text-kumo-inactive">
+                Showing the first part of {formatSize(state.size)}. Download for the whole file.
+              </p>
+            ) : null}
+            <pre className="text-xs leading-5 whitespace-pre-wrap break-words">{state.text}</pre>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function FilesPanel({ session, refreshKey }: { session: string; refreshKey: number }) {
+  const [dir, setDir] = useState("/workspace");
+  const [entries, setEntries] = useState<FileEntry[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [open, setOpen] = useState<string | null>(null);
+  const [tick, setTick] = useState(0);
+
+  // 换会话回到根目录、关掉预览。
+  useEffect(() => {
+    setDir("/workspace");
+    setOpen(null);
+  }, [session]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setError(null);
+    fetchJson<FileEntry[]>(`/api/session/${session}/files?path=${encodeURIComponent(dir)}`)
+      .then((list) => {
+        if (!cancelled) setEntries(list);
+      })
+      .catch((cause) => {
+        if (!cancelled) {
+          setEntries([]);
+          setError(cause instanceof Error ? cause.message : String(cause));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [session, dir, refreshKey, tick]);
+
+  if (open) {
+    return <FilePreview session={session} path={open} onClose={() => setOpen(null)} />;
+  }
+
+  const crumbs = dir.split("/").filter(Boolean); // ["workspace", "sub", ...]
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex shrink-0 items-center gap-1 border-b border-kumo-line px-3 py-1.5 text-xs">
+        <div className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden">
+          {crumbs.map((crumb, index) => {
+            const target = `/${crumbs.slice(0, index + 1).join("/")}`;
+            const last = index === crumbs.length - 1;
+            return (
+              <span key={target} className="flex min-w-0 items-center gap-1">
+                {index > 0 ? <span className="text-kumo-inactive">/</span> : null}
+                <button
+                  type="button"
+                  disabled={last}
+                  onClick={() => setDir(target)}
+                  className={`truncate ${last ? "font-semibold" : "text-kumo-subtle hover:underline"}`}
+                >
+                  {crumb}
+                </button>
+              </span>
+            );
+          })}
+        </div>
+        <Button
+          variant="ghost"
+          shape="square"
+          size="sm"
+          aria-label="Refresh files"
+          onClick={() => setTick((n) => n + 1)}
+          icon={<ArrowsClockwiseIcon size={14} />}
+        />
+      </div>
+      <ul className="min-h-0 flex-1 overflow-y-auto p-2">
+        {error ? <li className="px-2 py-1 text-xs text-kumo-danger">{error}</li> : null}
+        {entries === null ? (
+          <li className="px-2 py-1 text-xs text-kumo-subtle">Loading…</li>
+        ) : entries.length === 0 && !error ? (
+          <li className="px-2 py-1 text-xs text-kumo-subtle">Empty</li>
+        ) : null}
+        {entries?.map((entry) => (
+          <li key={entry.path}>
+            <button
+              type="button"
+              onClick={() => (entry.kind === "dir" ? setDir(entry.path) : setOpen(entry.path))}
+              className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-kumo-elevated"
+            >
+              {entry.kind === "dir" ? (
+                <FolderIcon size={14} className="shrink-0 text-kumo-accent" weight="fill" />
+              ) : (
+                <FileIcon size={14} className="shrink-0 text-kumo-subtle" />
+              )}
+              <span className="min-w-0 flex-1 truncate text-xs">{entry.name}</span>
+              {entry.kind !== "dir" ? (
+                <span className="shrink-0 text-[10px] text-kumo-inactive">
+                  {formatSize(entry.size)}
+                </span>
+              ) : null}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function Sidebar({
+  session,
+  tools,
+  activeTools,
+  filesRefreshKey,
+  onClose
+}: {
+  session: string;
+  tools: readonly ToolInfo[];
+  activeTools: readonly string[];
+  filesRefreshKey: number;
+  onClose: () => void;
+}) {
+  const [tab, setTab] = useState<"files" | "tools">("files");
+  const tabClass = (active: boolean) =>
+    `rounded-md px-2.5 py-1 text-xs font-semibold ${
+      active ? "bg-kumo-elevated text-kumo-default" : "text-kumo-subtle hover:text-kumo-default"
+    }`;
+  return (
+    <aside
+      className="flex min-h-0 flex-col border-l border-kumo-line bg-kumo-base"
+      aria-label="Workspace"
+    >
+      <div className="flex h-[68px] shrink-0 items-center justify-between gap-2 border-b border-kumo-line px-3">
+        <div className="flex items-center gap-1" role="tablist">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "files"}
+            className={tabClass(tab === "files")}
+            onClick={() => setTab("files")}
+          >
+            Files
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "tools"}
+            className={tabClass(tab === "tools")}
+            onClick={() => setTab("tools")}
+          >
+            Tools
+          </button>
+        </div>
+        <Button
+          variant="ghost"
+          shape="square"
+          aria-label="Close panel"
           onClick={onClose}
           icon={<XIcon size={16} />}
         />
       </div>
-      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
-        {tools.map((tool) => (
-          <Surface
-            key={tool.name}
-            className="rounded-lg p-3 ring ring-kumo-line"
-          >
-            <div className="flex items-center gap-2">
-              {activeTools.includes(tool.name) ? (
-                <GearIcon size={14} className="animate-spin text-kumo-accent" />
-              ) : (
-                <WrenchIcon size={14} className="text-kumo-inactive" />
-              )}
-              <code className="text-xs font-semibold">{tool.name}</code>
-            </div>
-            <p className="mt-1 text-xs text-kumo-subtle">{tool.description}</p>
-          </Surface>
-        ))}
-      </div>
+      {tab === "files" ? (
+        <FilesPanel session={session} refreshKey={filesRefreshKey} />
+      ) : (
+        <ToolsPanel tools={tools} activeTools={activeTools} />
+      )}
     </aside>
   );
 }
@@ -797,6 +1148,42 @@ function App() {
     setSessions(next);
     saveSessions(next);
   };
+
+  // 启动时和服务端目录同步：本地有、服务端没有的先迁上去，然后以服务端为准。
+  // 服务端不可用就继续用本地缓存，不影响聊天。
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const remote = await sessionsApi.list();
+        const known = new Set(remote.map((record) => record.id));
+        const missing = loadSessions().filter((entry) => !known.has(entry.id));
+        for (const entry of missing) {
+          remote.push(await sessionsApi.register(entry));
+        }
+        if (cancelled) return;
+        const merged = remote
+          .sort((a, b) => b.updatedAt - a.updatedAt)
+          .map(fromRecord);
+        if (merged.length === 0) {
+          // 服务端是空的（全新账号）：把当前这个登记上去。
+          const current = loadSessions().find((s) => s.id === localStorage.getItem(SESSION_KEY));
+          const entry = current ?? { id: crypto.randomUUID(), createdAt: Date.now() };
+          merged.push(fromRecord(await sessionsApi.register(entry)));
+        }
+        updateSessions(merged);
+        if (!merged.some((s) => s.id === localStorage.getItem(SESSION_KEY))) {
+          setSession(merged[0].id);
+        }
+      } catch (cause) {
+        console.warn("session index unavailable, using local cache", cause);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   // ==========================================================================
 
   const [prompt, setPrompt] = useState("");
@@ -855,15 +1242,24 @@ function App() {
     scrollToBottom("instant");
   }, [session]);
 
-  // 会话还没名字时，用它的第一条消息当名字。
+  // 会话还没名字时，用它的第一条消息当名字（本地立刻生效，服务端异步同步）。
   useEffect(() => {
     const entry = sessions.find((s) => s.id === session);
     if (!entry || entry.title) return;
     const title = autoTitle(messages);
     if (!title) return;
     updateSessions(sessions.map((s) => (s.id === session ? { ...s, title } : s)));
+    sessionsApi.rename(session, title).catch((cause) => console.warn("rename failed", cause));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages, session]);
+
+  // 一轮跑完刷新文件面板：模型可能刚写了文件。
+  const [filesRefreshKey, setFilesRefreshKey] = useState(0);
+  const wasRunning = useRef(false);
+  useEffect(() => {
+    if (wasRunning.current && !running) setFilesRefreshKey((n) => n + 1);
+    wasRunning.current = running;
+  }, [running]);
 
   const connected = status === "open";
 
@@ -885,6 +1281,7 @@ function App() {
     const entry: SessionEntry = { id: crypto.randomUUID(), createdAt: Date.now() };
     updateSessions([entry, ...sessions]);
     setSession(entry.id);
+    sessionsApi.register(entry).catch((cause) => console.warn("register failed", cause));
   };
 
   const renameSession = (id: string) => {
@@ -897,6 +1294,7 @@ function App() {
         s.id === id ? { ...s, title: title.trim() || undefined } : s
       )
     );
+    sessionsApi.rename(id, title).catch((cause) => console.warn("rename failed", cause));
   };
 
   /**
@@ -919,15 +1317,14 @@ function App() {
     setDeleting((set) => new Set(set).add(target));
     let next = sessions.filter((s) => s.id !== target);
     if (next.length === 0) {
-      next = [{ id: crypto.randomUUID(), createdAt: Date.now() }];
+      const fresh: SessionEntry = { id: crypto.randomUUID(), createdAt: Date.now() };
+      next = [fresh];
+      sessionsApi.register(fresh).catch((cause) => console.warn("register failed", cause));
     }
     updateSessions(next);
     if (target === session) setSession(next[0].id);
     try {
-      const response = await fetch(`/api/session/${target}`, { method: "DELETE" });
-      if (!response.ok) {
-        throw new Error(`${response.status} ${await response.text()}`);
-      }
+      await sessionsApi.remove(target);
     } catch (cause) {
       console.error("delete session failed", cause);
       window.alert(`删除失败：${cause instanceof Error ? cause.message : String(cause)}`);
@@ -1147,7 +1544,7 @@ function App() {
                 }}
                 placeholder={
                   running
-                    ? "Queue a follow-up, or steer the running turn"
+                    ? "Enter: queue for after this turn · Steer: interrupt it now"
                     : "Ask Pi to use a tool"
                 }
                 aria-label="Message Pi"
@@ -1157,16 +1554,24 @@ function App() {
               />
               {running ? (
                 <div className="mb-0.5 flex gap-1.5">
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    aria-label="Steer"
-                    disabled={prompt.trim() === ""}
-                    onClick={() => submit("steer")}
+                  {/* title 就是悬停提示：说明 Steer 和 Enter 的区别 */}
+                  <span
+                    title={
+                      "Steer: 插进当前这一轮。模型下一次调完工具回来就会看到，可以中途改方向。\n" +
+                      "Enter: 排队。等这一轮完全结束后，作为下一条消息处理。"
+                    }
                   >
-                    Steer
-                  </Button>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      aria-label="Steer: interrupt the running turn with this message"
+                      disabled={prompt.trim() === ""}
+                      onClick={() => submit("steer")}
+                    >
+                      Steer
+                    </Button>
+                  </span>
                   <Button
                     type="button"
                     variant="secondary"
@@ -1201,8 +1606,10 @@ function App() {
 
       {toolsOpen ? (
         <Sidebar
+          session={session}
           tools={catalog}
           activeTools={runningNames}
+          filesRefreshKey={filesRefreshKey}
           onClose={() => setToolsOpen(false)}
         />
       ) : null}

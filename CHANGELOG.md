@@ -13,7 +13,7 @@ commit 哈希对应 GitHub `righttu/pi-harness` 的提交。
 
 ---
 
-## 未发布
+## ceb6f24 — 2026-10-31 — 新会话 /workspace 不存在、Plan mode 提示
 
 ### 修复
 - 新会话里模型的 `ls` / `find` 报 `no such path: /workspace`：对象启动时先 `mkdir /workspace`。之前只修了 Files 面板，没修模型这边。

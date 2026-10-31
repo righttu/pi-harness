@@ -13,7 +13,7 @@ import { WebSockets } from "agents/websockets";
 import { PiSessionSockets } from "./sockets";
 import { createWorkspaceTools, JAVASCRIPT_BACKEND } from "./workspace";
 
-const MODEL_ID = "@cf/zai-org/glm-5.3-flash";
+const MODEL_ID = "dynamic/pi-route";
 
 const PREAMBLE =
   "You are a concise playground assistant. You have a durable workspace at /workspace: read, write, edit, delete, list (ls), find and grep files there, and run JavaScript modules in it with exec, which can also use git. Paths are absolute. Use tools whenever they can answer the request, and explain their results plainly.";
@@ -21,7 +21,7 @@ const PREAMBLE =
 /** Playable pi session backed by one Durable Object. */
 export class PiAgent extends DurableObject<Env> {
   // Workers AI and AI Gateway over the AI binding, as a pi-ai provider.
-  readonly ai = createAI({ binding: this.env.AI });
+  readonly ai = createAI({ binding: this.env.AI, id: "pi-gateway" });
   // A durable filesystem on the object's SQLite, beside pi's own tables.
   // `exec` runs JavaScript modules in a fresh Dynamic Worker per call, with
   // no network of its own. `git` turns on `workspace.git`, which the `ws:git`

@@ -8,6 +8,7 @@ import {
   Text
 } from "@cloudflare/kumo";
 import {
+  ArrowDownIcon,
   BrainIcon,
   CheckCircleIcon,
   CodeIcon,
@@ -16,7 +17,9 @@ import {
   GitBranchIcon,
   MoonIcon,
   PaperPlaneRightIcon,
+  PencilSimpleIcon,
   PlusIcon,
+  SidebarSimpleIcon,
   StopIcon,
   SunIcon,
   TrashIcon,
@@ -31,6 +34,7 @@ import { createRoot } from "react-dom/client";
 import { Streamdown } from "streamdown";
 import type { ToolInfo, TranscriptMessage, TranscriptPart } from "./protocol";
 import { usePiSession } from "./use-pi-session";
+import type { PiRunningTool } from "./view";
 import "./styles.css";
 
 const SESSION_KEY = "pi-harness-session";
@@ -71,7 +75,8 @@ const SUGGESTIONS = [
 
 const SESSIONS_KEY = "pi-harness-sessions";
 
-type SessionEntry = { id: string; createdAt: number };
+/** `title` 是用户改的名字，或者从第一条消息自动取的；没有就显示 id + 时间。 */
+type SessionEntry = { id: string; createdAt: number; title?: string };
 
 /** 读取会话目录；不存在或损坏则返回空数组。 */
 function loadSessions(): SessionEntry[] {
@@ -116,13 +121,29 @@ function initSessions(): { current: string; sessions: SessionEntry[] } {
   return { current, sessions };
 }
 
-/** 列表里显示的名字：UUID 前 8 位 + 创建时间。 */
-function sessionLabel(entry: SessionEntry): string {
+function sessionTime(entry: SessionEntry): string {
   const when = new Date(entry.createdAt);
-  const time = `${when.getMonth() + 1}/${when.getDate()} ${String(
+  return `${when.getMonth() + 1}/${when.getDate()} ${String(
     when.getHours()
   ).padStart(2, "0")}:${String(when.getMinutes()).padStart(2, "0")}`;
-  return `${entry.id.slice(0, 8)} · ${time}`;
+}
+
+/** 列表里显示的名字：用户起的标题，否则 UUID 前 8 位。 */
+function sessionLabel(entry: SessionEntry): string {
+  return entry.title?.trim() || entry.id.slice(0, 8);
+}
+
+/** 自动标题：第一条用户消息的前 40 个字符。 */
+function autoTitle(messages: readonly TranscriptMessage[]): string | undefined {
+  const first = messages.find((message) => message.role === "user");
+  if (!first) return undefined;
+  const text = first.parts
+    .map((part) => (part.type === "text" ? part.text : ""))
+    .join("")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!text) return undefined;
+  return text.length > 40 ? `${text.slice(0, 40)}…` : text;
 }
 // ============================================================================
 
@@ -156,52 +177,80 @@ function JsonBlock({ value }: { value: unknown }) {
   );
 }
 
-/** 子对话过程里的一条步骤。 */
-function StepItem({
-  label,
-  done,
-  active
-}: {
-  label: string;
-  done?: boolean;
-  active?: boolean;
-}) {
+// ============================================================================
+// 子对话（subagent）的过程展示。
+//
+// 服务端 src/subagent.ts 盯着子对话的 pi.live 文档，把它每次请求模型、
+// 每个工具的开始/结束写成一行步骤（"→ read"、"✓ read"、"→ model"…）：
+//   - 运行中：通过 api.output() 流过来，前端在 view.tools[].output 里；
+//   - 完成后：整份步骤表放在工具结果的 details.steps 里。
+// 下面两张卡片分别负责这两个阶段。
+// ============================================================================
+
+/** 把 "→ name" / "✓ name" 形式的步骤文本渲染成列表。最后一个 "→" 是进行中。 */
+function StepList({ steps, running }: { steps: readonly string[]; running: boolean }) {
+  if (steps.length === 0) {
+    return running ? (
+      <div className="flex items-center gap-2 text-xs text-kumo-subtle">
+        <GearIcon size={12} className="animate-spin" />
+        Starting sub-conversation…
+      </div>
+    ) : null;
+  }
+  // 每个工具名只要出现过 "✓"，它之前的 "→" 就算完成。
+  const finished = new Set(
+    steps.filter((s) => s.startsWith("✓")).map((s) => s.slice(1).trim())
+  );
   return (
-    <div className="flex items-center gap-2">
-      {done ? (
-        <CheckCircleIcon size={12} className="shrink-0 text-kumo-success" />
-      ) : active ? (
-        <GearIcon size={12} className="shrink-0 animate-spin text-kumo-accent" />
-      ) : (
-        <div className="size-3 shrink-0 rounded-full border border-kumo-inactive" />
-      )}
-      <span
-        className={`text-xs ${
-          done
-            ? "text-kumo-subtle line-through"
-            : active
-              ? "text-kumo-default font-medium"
-              : "text-kumo-inactive"
-        }`}
-      >
-        {label}
-      </span>
-    </div>
+    <ol className="space-y-1">
+      {steps.map((step, index) => {
+        const done = step.startsWith("✓");
+        const name = step.slice(1).trim();
+        // "→ x" 且还没有对应的 "✓ x"，并且子对话仍在跑：进行中。
+        const active = !done && running && !finished.has(name);
+        if (done) return null; // 只画一条：用 "→" 那条代表这个工具
+        return (
+          <li key={index} className="flex items-center gap-2">
+            {active ? (
+              <GearIcon size={12} className="shrink-0 animate-spin text-kumo-accent" />
+            ) : (
+              <CheckCircleIcon size={12} className="shrink-0 text-kumo-success" />
+            )}
+            <span
+              className={`font-mono text-xs ${
+                active ? "font-medium text-kumo-default" : "text-kumo-subtle"
+              }`}
+            >
+              {name}
+            </span>
+          </li>
+        );
+      })}
+    </ol>
   );
 }
 
-/** 子对话调用时展示的卡片（运行中）。 */
+function taskOf(args: unknown): string {
+  return (args as { task?: string } | undefined)?.task ?? "Unknown task";
+}
+
+/** 子对话调用时展示的卡片。`output` 是运行中流过来的步骤文本。 */
 function SubagentCallCard({
   part,
-  running
+  running,
+  output
 }: {
   part: Extract<TranscriptPart, { type: "tool-call" }>;
   running: boolean;
+  output: string;
 }) {
-  const task =
-    (part.arguments as { task?: string } | undefined)?.task ?? "Unknown task";
+  const task = taskOf(part.arguments);
+  const steps = output.split("\n").filter((line) => line.trim() !== "");
   return (
-    <details className="rounded-xl border border-kumo-line bg-kumo-base" open={running}>
+    <details
+      className="rounded-xl border border-kumo-line bg-kumo-base"
+      open={running || undefined}
+    >
       <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5">
         {running ? (
           <GearIcon size={14} className="animate-spin text-kumo-accent" />
@@ -209,8 +258,9 @@ function SubagentCallCard({
           <CheckCircleIcon size={14} className="text-kumo-success" />
         )}
         <GitBranchIcon size={14} className="text-kumo-subtle" />
-        <span className="min-w-0 flex-1 truncate text-xs font-semibold">
-          Subagent
+        <span className="min-w-0 flex-1 truncate text-xs">
+          <span className="font-semibold">Subagent</span>
+          <span className="ml-2 text-kumo-subtle">{task}</span>
         </span>
         <Badge variant={running ? "primary" : "secondary"}>
           {running ? "Running" : "Called"}
@@ -221,22 +271,16 @@ function SubagentCallCard({
           <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-kumo-inactive">
             Task
           </p>
-          <p className="whitespace-pre-wrap text-xs text-kumo-default">
-            {task}
-          </p>
+          <p className="whitespace-pre-wrap text-xs text-kumo-default">{task}</p>
         </div>
-        {running && (
-          <div className="space-y-2">
-            <p className="text-[10px] font-semibold uppercase tracking-wide text-kumo-inactive">
+        {running ? (
+          <div>
+            <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-kumo-inactive">
               Progress
             </p>
-            <div className="space-y-1.5">
-              <StepItem done label="Create sub-conversation" />
-              <StepItem done label="Submit task" />
-              <StepItem active label="Processing in sub-conversation…" />
-            </div>
+            <StepList steps={steps} running />
           </div>
-        )}
+        ) : null}
       </div>
     </details>
   );
@@ -249,10 +293,11 @@ function SubagentResultCard({
   part: Extract<TranscriptPart, { type: "tool-result" }>;
 }) {
   const details = part.details as
-    | { conversationId?: string; task?: string; status?: string }
+    | { conversationId?: string; task?: string; steps?: string[] }
     | undefined;
   const task = details?.task ?? "Unknown task";
   const conversationId = details?.conversationId;
+  const steps = details?.steps ?? [];
 
   const text = part.content
     .filter((content) => content.type === "text")
@@ -288,6 +333,14 @@ function SubagentResultCard({
             {task}
           </p>
         </div>
+        {steps.length > 0 ? (
+          <div>
+            <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-kumo-inactive">
+              Steps ({steps.filter((s) => s.startsWith("→")).length})
+            </p>
+            <StepList steps={steps} running={false} />
+          </div>
+        ) : null}
         {conversationId && (
           <div>
             <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-kumo-inactive">
@@ -315,13 +368,15 @@ function SubagentResultCard({
 
 function ToolCallCard({
   part,
-  running
+  running,
+  output
 }: {
   part: Extract<TranscriptPart, { type: "tool-call" }>;
   running: boolean;
+  output: string;
 }) {
   if (part.name === "subagent") {
-    return <SubagentCallCard part={part} running={running} />;
+    return <SubagentCallCard part={part} running={running} output={output} />;
   }
   return (
     <details className="rounded-xl border border-kumo-line bg-kumo-base">
@@ -412,7 +467,8 @@ function AssistantPart({
   running
 }: {
   part: TranscriptPart;
-  running: boolean;
+  /** The live slot of this tool call, while it runs. */
+  running: PiRunningTool | undefined;
 }) {
   switch (part.type) {
     case "text":
@@ -437,7 +493,13 @@ function AssistantPart({
         </details>
       );
     case "tool-call":
-      return <ToolCallCard part={part} running={running} />;
+      return (
+        <ToolCallCard
+          part={part}
+          running={running !== undefined}
+          output={running?.output ?? ""}
+        />
+      );
     case "tool-result":
       return <ToolResultCard part={part} />;
     case "image":
@@ -471,7 +533,7 @@ function AssistantMessage({
 }: {
   message: TranscriptMessage;
   streaming?: boolean;
-  runningTools: readonly string[];
+  runningTools: readonly PiRunningTool[];
 }) {
   return (
     <div className="flex items-start gap-3">
@@ -483,10 +545,12 @@ function AssistantMessage({
           <AssistantPart
             key={`${message.id}-${index}`}
             part={part}
+            // 按 callId 找这个调用的运行槽位，而不是按名字：同名工具可能
+            // 在一轮里被调用多次。
             running={
-              streaming &&
-              part.type === "tool-call" &&
-              runningTools.includes(part.name)
+              part.type === "tool-call"
+                ? runningTools.find((tool) => tool.callId === part.id)
+                : undefined
             }
           />
         ))}
@@ -523,7 +587,7 @@ function Message({
 }: {
   message: TranscriptMessage;
   streaming?: boolean;
-  runningTools: readonly string[];
+  runningTools: readonly PiRunningTool[];
 }) {
   switch (message.role) {
     case "user":
@@ -597,6 +661,123 @@ function Sidebar({
   );
 }
 
+// ============================================================================
+// 左侧会话栏：列出所有会话，当前的高亮；每一项悬停出现"改名"和"删除"按钮，
+// 不用先切过去再删。
+// ============================================================================
+function SessionSidebar({
+  sessions,
+  current,
+  deleting,
+  onSelect,
+  onNew,
+  onRename,
+  onDelete,
+  onClose
+}: {
+  sessions: readonly SessionEntry[];
+  current: string;
+  deleting: ReadonlySet<string>;
+  onSelect: (id: string) => void;
+  onNew: () => void;
+  onRename: (id: string) => void;
+  onDelete: (id: string) => void;
+  onClose: () => void;
+}) {
+  return (
+    <aside
+      className="flex min-h-0 flex-col border-r border-kumo-line bg-kumo-base"
+      aria-label="Sessions"
+    >
+      <div className="flex h-[68px] shrink-0 items-center justify-between gap-2 border-b border-kumo-line px-3">
+        <div className="flex items-center gap-2 pl-1">
+          <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-kumo-brand text-white">
+            <BrainIcon size={17} weight="bold" />
+          </div>
+          <Text size="sm" bold>
+            Pi harness
+          </Text>
+        </div>
+        <div className="flex items-center">
+          <Button
+            variant="ghost"
+            shape="square"
+            aria-label="New session"
+            onClick={onNew}
+            icon={<PlusIcon size={16} />}
+          />
+          <Button
+            variant="ghost"
+            shape="square"
+            aria-label="Hide sessions"
+            onClick={onClose}
+            icon={<SidebarSimpleIcon size={16} />}
+          />
+        </div>
+      </div>
+      <ul className="min-h-0 flex-1 space-y-0.5 overflow-y-auto p-2">
+        {sessions.map((entry) => {
+          const active = entry.id === current;
+          const busy = deleting.has(entry.id);
+          return (
+            <li
+              key={entry.id}
+              className={`group flex items-center gap-1 rounded-lg pr-1 ${
+                active ? "bg-kumo-elevated" : "hover:bg-kumo-elevated/60"
+              } ${busy ? "opacity-50" : ""}`}
+            >
+              <button
+                type="button"
+                onClick={() => onSelect(entry.id)}
+                disabled={busy}
+                aria-current={active ? "true" : undefined}
+                className="min-w-0 flex-1 px-2.5 py-2 text-left"
+              >
+                <div
+                  className={`truncate text-sm ${active ? "font-semibold" : ""}`}
+                >
+                  {sessionLabel(entry)}
+                </div>
+                <div className="truncate text-[10px] text-kumo-inactive">
+                  {sessionTime(entry)} · {entry.id.slice(0, 8)}
+                </div>
+              </button>
+              {/* 悬停或当前项才显示操作按钮，避免列表太吵 */}
+              <div
+                className={`flex shrink-0 items-center ${
+                  active ? "" : "opacity-0 group-hover:opacity-100 focus-within:opacity-100"
+                }`}
+              >
+                <Button
+                  variant="ghost"
+                  shape="square"
+                  size="sm"
+                  aria-label={`Rename ${sessionLabel(entry)}`}
+                  disabled={busy}
+                  onClick={() => onRename(entry.id)}
+                  icon={<PencilSimpleIcon size={14} />}
+                />
+                <Button
+                  variant="ghost"
+                  shape="square"
+                  size="sm"
+                  aria-label={`Delete ${sessionLabel(entry)}`}
+                  disabled={busy}
+                  onClick={() => onDelete(entry.id)}
+                  icon={<TrashIcon size={14} />}
+                />
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+    </aside>
+  );
+}
+
+/** 离底部多近算"在底部"，像素。 */
+const STICK_THRESHOLD = 80;
+
 function App() {
   // ==========================================================================
   // 会话状态：当前会话 id + 会话目录。两者都同步写回 localStorage。
@@ -604,26 +785,30 @@ function App() {
   const [initial] = useState(initSessions);
   const [session, setSessionState] = useState(initial.current);
   const [sessions, setSessions] = useState<SessionEntry[]>(initial.sessions);
-  const [deleting, setDeleting] = useState(false);
+  const [deleting, setDeleting] = useState<ReadonlySet<string>>(new Set());
 
   /** 切换当前会话（也会记进 localStorage，刷新后还是它）。 */
   const setSession = (id: string) => {
     localStorage.setItem(SESSION_KEY, id);
     setSessionState(id);
   };
+
+  const updateSessions = (next: SessionEntry[]) => {
+    setSessions(next);
+    saveSessions(next);
+  };
   // ==========================================================================
 
   const [prompt, setPrompt] = useState("");
-  const [toolsOpen, setToolsOpen] = useState(
-    () => window.matchMedia("(min-width: 1100px)").matches
-  );
-  const endRef = useRef<HTMLDivElement>(null);
+  const wide = () => window.matchMedia("(min-width: 1100px)").matches;
+  const [toolsOpen, setToolsOpen] = useState(wide);
+  const [sessionsOpen, setSessionsOpen] = useState(wide);
   const {
     status,
     messages,
     live,
     running,
-    tools: running_,
+    tools: runningTools,
     catalog,
     queued,
     retry,
@@ -631,11 +816,54 @@ function App() {
     submit: submitPrompt,
     abort
   } = usePiSession(session);
-  const runningTools = running_.map((tool) => tool.name);
+
+  // ==========================================================================
+  // 自动滚动，但只在你本来就在底部的时候。
+  //
+  // 往上翻历史时 stuck 变成 false，新内容来了也不动你；翻回底部（或点
+  // 右下角的箭头、或发新消息）又会重新跟随。
+  // ==========================================================================
+  const scrollRef = useRef<HTMLElement>(null);
+  const stuckRef = useRef(true);
+  const [stuck, setStuck] = useState(true);
+
+  const scrollToBottom = (behavior: ScrollBehavior = "smooth") => {
+    const el = scrollRef.current;
+    if (!el) return;
+    stuckRef.current = true;
+    setStuck(true);
+    el.scrollTo({ top: el.scrollHeight, behavior });
+  };
+
+  const onScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const atBottom =
+      el.scrollHeight - el.scrollTop - el.clientHeight < STICK_THRESHOLD;
+    if (atBottom !== stuckRef.current) {
+      stuckRef.current = atBottom;
+      setStuck(atBottom);
+    }
+  };
 
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, live, running]);
+    if (stuckRef.current) scrollToBottom();
+  }, [messages, live, running, runningTools]);
+
+  // 换会话：从底部开始看。
+  useEffect(() => {
+    scrollToBottom("instant");
+  }, [session]);
+
+  // 会话还没名字时，用它的第一条消息当名字。
+  useEffect(() => {
+    const entry = sessions.find((s) => s.id === session);
+    if (!entry || entry.title) return;
+    const title = autoTitle(messages);
+    if (!title) return;
+    updateSessions(sessions.map((s) => (s.id === session ? { ...s, title } : s)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, session]);
 
   const connected = status === "open";
 
@@ -645,86 +873,130 @@ function App() {
     if (!text || !connected) return;
     setPrompt("");
     submitPrompt(text, whenBusy);
+    scrollToBottom();
   };
 
   // ==========================================================================
-  // 新建 / 删除会话
+  // 新建 / 改名 / 删除会话
   // ==========================================================================
 
   /** 新建：生成一个新 UUID，加进目录顶部，并切换过去。旧会话保留。 */
   const newSession = () => {
     const entry: SessionEntry = { id: crypto.randomUUID(), createdAt: Date.now() };
-    const next = [entry, ...sessions];
-    setSessions(next);
-    saveSessions(next);
+    updateSessions([entry, ...sessions]);
     setSession(entry.id);
   };
 
+  const renameSession = (id: string) => {
+    const entry = sessions.find((s) => s.id === id);
+    if (!entry) return;
+    const title = window.prompt("会话名称", entry.title ?? "");
+    if (title === null) return;
+    updateSessions(
+      sessions.map((s) =>
+        s.id === id ? { ...s, title: title.trim() || undefined } : s
+      )
+    );
+  };
+
   /**
-   * 删除当前会话：
-   *   1. 先切到另一个会话（没有就新建一个），让 WebSocket 不再连着要删的 DO；
-   *   2. 从目录里移除；
-   *   3. 调 DELETE /api/session/<id>，服务端把那个 DO 的数据全部删掉。
+   * 删除任意一个会话（不必是当前的）：
+   *   1. 先从目录里移除；如果删的是当前会话，切到剩下的第一个（没有就新建），
+   *      让 WebSocket 不再连着要删的 DO；
+   *   2. 调 DELETE /api/session/<id>，服务端把那个 DO 的数据全部删掉；
+   *   3. 失败就把目录项放回去，数据还在服务端，下次还能再删。
    */
-  const deleteSession = async () => {
-    const target = session;
-    if (!window.confirm(`删除会话 ${target.slice(0, 8)}？对话记录和工作区文件会一起删除，不可恢复。`)) {
+  const deleteSession = async (target: string) => {
+    const entry = sessions.find((s) => s.id === target);
+    if (!entry) return;
+    if (
+      !window.confirm(
+        `删除会话「${sessionLabel(entry)}」？对话记录和工作区文件会一起删除，不可恢复。`
+      )
+    ) {
       return;
     }
-    setDeleting(true);
+    setDeleting((set) => new Set(set).add(target));
+    let next = sessions.filter((s) => s.id !== target);
+    if (next.length === 0) {
+      next = [{ id: crypto.randomUUID(), createdAt: Date.now() }];
+    }
+    updateSessions(next);
+    if (target === session) setSession(next[0].id);
     try {
-      const remaining = sessions.filter((s) => s.id !== target);
-      let next = remaining;
-      if (next.length === 0) {
-        next = [{ id: crypto.randomUUID(), createdAt: Date.now() }];
-      }
-      setSessions(next);
-      saveSessions(next);
-      setSession(next[0].id);
       const response = await fetch(`/api/session/${target}`, { method: "DELETE" });
       if (!response.ok) {
-        console.error("delete session failed", response.status, await response.text());
+        throw new Error(`${response.status} ${await response.text()}`);
       }
+    } catch (cause) {
+      console.error("delete session failed", cause);
+      window.alert(`删除失败：${cause instanceof Error ? cause.message : String(cause)}`);
+      updateSessions([entry, ...loadSessions().filter((s) => s.id !== target)]);
     } finally {
-      setDeleting(false);
+      setDeleting((set) => {
+        const copy = new Set(set);
+        copy.delete(target);
+        return copy;
+      });
     }
   };
   // ==========================================================================
 
   const empty = messages.length === 0 && !live && !running;
+  const runningNames = runningTools.map((tool) => tool.name);
+
+  // 三栏：会话 | 聊天 | 工具。前后两栏都可以收起。
+  const columns = [
+    sessionsOpen ? "minmax(220px,18vw)" : null,
+    "minmax(480px,1fr)",
+    toolsOpen ? "minmax(300px,26vw)" : null
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   return (
     <div
-      className={`grid h-dvh overflow-hidden bg-kumo-elevated text-kumo-default ${
-        toolsOpen
-          ? "lg:grid-cols-[minmax(520px,1fr)_minmax(300px,26vw)]"
-          : "grid-cols-1"
-      }`}
+      className="grid h-dvh overflow-hidden bg-kumo-elevated text-kumo-default"
+      style={{ gridTemplateColumns: columns }}
     >
-      <section className="flex min-h-0 min-w-0 flex-col" aria-label="Chat">
+      {sessionsOpen ? (
+        <SessionSidebar
+          sessions={sessions}
+          current={session}
+          deleting={deleting}
+          onSelect={setSession}
+          onNew={newSession}
+          onRename={renameSession}
+          onDelete={(id) => void deleteSession(id)}
+          onClose={() => setSessionsOpen(false)}
+        />
+      ) : null}
+
+      <section className="relative flex min-h-0 min-w-0 flex-col" aria-label="Chat">
         <header className="shrink-0 border-b border-kumo-line bg-kumo-base">
           <div className="mx-auto flex h-[68px] max-w-3xl items-center justify-between gap-3 px-5">
-            <div className="flex min-w-0 items-center gap-3">
-              <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-kumo-brand text-white">
-                <BrainIcon size={20} weight="bold" />
-              </div>
+            <div className="flex min-w-0 items-center gap-2">
+              {sessionsOpen ? null : (
+                <Button
+                  variant="ghost"
+                  shape="square"
+                  aria-label="Show sessions"
+                  onClick={() => setSessionsOpen(true)}
+                  icon={<SidebarSimpleIcon size={16} />}
+                />
+              )}
               <div className="min-w-0">
-                <h1 className="truncate text-base font-semibold">Pi harness</h1>
-                {/* ============================================================
-                    会话选择器：下拉列出所有会话，选中即切换。
-                    ============================================================ */}
-                <select
-                  aria-label="Switch session"
-                  value={session}
-                  onChange={(event) => setSession(event.target.value)}
-                  className="max-w-[220px] truncate rounded border border-kumo-line bg-kumo-base px-1.5 py-0.5 text-xs text-kumo-subtle"
-                >
-                  {sessions.map((entry) => (
-                    <option key={entry.id} value={entry.id}>
-                      {sessionLabel(entry)}
-                    </option>
-                  ))}
-                </select>
+                <h1 className="truncate text-base font-semibold">
+                  {sessionLabel(
+                    sessions.find((s) => s.id === session) ?? {
+                      id: session,
+                      createdAt: 0
+                    }
+                  )}
+                </h1>
+                <p className="truncate text-xs text-kumo-subtle">
+                  {session.slice(0, 8)}
+                </p>
               </div>
             </div>
             <div className="flex shrink-0 items-center gap-1.5">
@@ -746,28 +1018,16 @@ function App() {
                 onClick={() => setToolsOpen((open) => !open)}
                 icon={<WrenchIcon size={16} />}
               />
-              <Button
-                variant="ghost"
-                shape="square"
-                aria-label="New session"
-                onClick={newSession}
-                icon={<PlusIcon size={16} />}
-              />
-              {/* 删除当前会话（连同服务端数据） */}
-              <Button
-                variant="ghost"
-                shape="square"
-                aria-label="Delete session"
-                disabled={deleting}
-                onClick={deleteSession}
-                icon={<TrashIcon size={16} />}
-              />
               <ModeToggle />
             </div>
           </div>
         </header>
 
-        <main className="min-h-0 flex-1 overflow-y-auto">
+        <main
+          ref={scrollRef}
+          onScroll={onScroll}
+          className="min-h-0 flex-1 overflow-y-auto"
+        >
           <div className="mx-auto max-w-3xl space-y-5 px-5 py-6">
             {empty ? (
               <div className="py-10 sm:py-16">
@@ -815,16 +1075,17 @@ function App() {
                     <GearIcon size={15} className="animate-spin" />
                     {retry
                       ? `Retrying: ${retry.error}`
-                      : runningTools.length > 0
-                        ? `Running ${runningTools.join(", ")}`
+                      : runningNames.length > 0
+                        ? `Running ${runningNames.join(", ")}`
                         : "Waiting for the model"}
                   </div>
                 </Surface>
               </div>
             ) : null}
 
-            {running_.map((tool) =>
-              tool.output ? (
+            {/* 运行中工具的流式输出。subagent 的输出已经画在它自己的卡片里。 */}
+            {runningTools.map((tool) =>
+              tool.output && tool.name !== "subagent" ? (
                 <pre
                   key={tool.callId}
                   className="ml-11 max-h-40 overflow-auto rounded-lg bg-kumo-elevated p-2.5 text-xs"
@@ -848,10 +1109,23 @@ function App() {
                 {error}
               </div>
             ) : null}
-
-            <div ref={endRef} />
           </div>
         </main>
+
+        {/* 翻上去看历史时出现：点一下回到底部并重新跟随。 */}
+        {!stuck ? (
+          <div className="pointer-events-none absolute inset-x-0 bottom-[132px] flex justify-center">
+            <Button
+              variant="secondary"
+              size="sm"
+              className="pointer-events-auto shadow-md"
+              icon={<ArrowDownIcon size={14} />}
+              onClick={() => scrollToBottom()}
+            >
+              {running ? "Follow" : "Latest"}
+            </Button>
+          </div>
+        ) : null}
 
         <div className="shrink-0 border-t border-kumo-line bg-kumo-base">
           <form
@@ -928,7 +1202,7 @@ function App() {
       {toolsOpen ? (
         <Sidebar
           tools={catalog}
-          activeTools={runningTools}
+          activeTools={runningNames}
           onClose={() => setToolsOpen(false)}
         />
       ) : null}

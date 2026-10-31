@@ -21,10 +21,14 @@ import {
   configure,
   defineExtension,
   defineTool,
+  LiveDoc,
   type EntryId,
   type Extension,
   type ToolExecutionApi
 } from "@earendil-works/pi-durable";
+
+/** 记录的子对话步骤上限，防止一个跑很久的子对话把 details 撑大。 */
+const MAX_STEPS = 200;
 
 /** 从子对话的最终 assistant 条目里取出纯文本。 */
 async function answerText(
@@ -89,7 +93,7 @@ export const Subagent: Extension = defineExtension({
         // ── 2. 把子对话 id 挂到工具调用的 details 上，前端可以据此找到子对话 ──
         await api.details({ conversationId: child }, context);
 
-        // ── 3. 把任务提交给子对话并等它答完 ──
+        // ── 3. 把任务提交给子对话 ──
         const handle = (await api.conversation(child, context))!;
         // 固定的 requestId：重跑时拿回同一个提交，而不是再提交一次。
         const request = {
@@ -97,20 +101,55 @@ export const Subagent: Extension = defineExtension({
           content: task,
           requestId: `subagent:${api.taskId}`
         } as const;
-        const settled = await (await handle.submit(request, context)).wait(context);
+        const submission = await handle.submit(request, context);
+
+        // ── 4. 盯着子对话的 pi.live 文档，把它的工具调用过程转成一行行
+        //       步骤：运行中的工具通过 api.output() 流给前端（父对话里那张
+        //       Subagent 卡片会实时显示），完成后整份步骤表放进 details。
+        //       每个 callId 的 running / done 各只记一次，所以步骤数有界。 ──
+        const steps: string[] = [];
+        const seen = new Set<string>();
+        const note = (line: string) => {
+          if (steps.length >= MAX_STEPS) return;
+          steps.push(line);
+          api.output(`${line}\n`);
+        };
+        let attempts = 0;
+        const watch = await api.watchDoc(LiveDoc, child, context);
+        watch?.start(async (live) => {
+          if (!live) return;
+          // 子对话向模型发了第几次请求（重试也算）。
+          const attempt = live.generation?.attempt ?? 0;
+          if (attempt > attempts) {
+            attempts = attempt;
+            note(attempt === 1 ? "→ model" : `→ model (retry ${attempt})`);
+          }
+          for (const slot of live.tools ?? []) {
+            if (slot.status === "pending") continue;
+            const key = `${slot.callId}:${slot.status}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            note(slot.status === "running" ? `→ ${slot.name}` : `✓ ${slot.name}`);
+          }
+        });
+
+        // ── 5. 等子对话答完 ──
+        let settled;
+        try {
+          settled = await submission.wait(context);
+        } finally {
+          await watch?.stop();
+        }
         if (settled.status !== "done" || settled.type !== "input") {
           throw new Error(`Subagent did not finish: ${settled.status}`);
         }
+        note("✓ answer");
 
-        // ── 4. 把子对话的最终回答作为工具输出返回给父对话 ──
+        // ── 6. 把子对话的最终回答作为工具输出返回给父对话 ──
         const text = await answerText(api, settled.answer, context);
         return {
           output: [{ type: "text", text }],
-          details: {
-            conversationId: child,
-            task,
-            status: "completed"
-          }
+          details: { conversationId: child, task, steps }
         };
       }
     })

@@ -32,6 +32,8 @@ export type PiServerMessage =
   | {
       readonly type: "hello";
       readonly session: PiSessionId;
+      /** 模型能不能看图：决定聊天框能不能贴图。 */
+      readonly vision: boolean;
       readonly tools: readonly PiToolInfo[];
     }
   /**

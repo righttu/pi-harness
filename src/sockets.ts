@@ -57,21 +57,32 @@ function send(socket: WebSocket, message: PiServerMessage): void {
  * `reattach()` from its `onStart` to give sockets that outlived the last
  * isolate a new watch and a fresh snapshot.
  */
+/** 宿主可选提供的东西。 */
+export type PiSessionSocketsHooks = {
+  /** 连接时告诉前端模型能做什么（hello 消息）。 */
+  capabilities?: () => { vision: boolean };
+  /** 每个新连接的请求，宿主可以从中记下站点 origin 之类的信息。 */
+  onRequest?: (request: Request) => void;
+};
+
 export class PiSessionSockets {
   readonly #harness: PiHarness;
   readonly #registry: RegistryReader;
   readonly #getWebSockets: (tag?: string) => WebSocket[];
+  readonly #hooks: PiSessionSocketsHooks;
   readonly #watches = new Map<WebSocket, AgentEventStream>();
 
   constructor(
     harness: PiHarness,
     /** The registry pi was opened with, for the tool list sent on connect. */
     registry: RegistryReader,
-    getWebSockets: (tag?: string) => WebSocket[]
+    getWebSockets: (tag?: string) => WebSocket[],
+    hooks: PiSessionSocketsHooks = {}
   ) {
     this.#harness = harness;
     this.#registry = registry;
     this.#getWebSockets = getWebSockets;
+    this.#hooks = hooks;
   }
 
   options(): WebSocketsOptions {
@@ -109,9 +120,11 @@ export class PiSessionSockets {
 
   async #onConnect(connection: Connection, ctx: ConnectionContext) {
     const session = sessionFromRequest(ctx.request, ROOT_SESSION);
+    this.#hooks.onRequest?.(ctx.request);
     send(connection, {
       type: "hello",
       session,
+      vision: this.#hooks.capabilities?.().vision ?? false,
       tools: this.#registry
         .snapshot()
         .tools()

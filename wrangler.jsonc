@@ -11,6 +11,9 @@
   // ==========================================================================
   "keep_vars": true,
   "ai": { "binding": "AI", "remote": true },
+  // 发布/分享文件的桶（publish 工具、Files 面板分享）。mount/ 前缀会只读
+  // 挂到每个工作区的 /workspace/r2。
+  "r2_buckets": [{ "binding": "PI_FILES", "bucket_name": "pi-files" }],
   // `exec` runs JavaScript in Dynamic Workers minted through this.
   "worker_loaders": [{ "binding": "LOADER" }],
   "assets": {

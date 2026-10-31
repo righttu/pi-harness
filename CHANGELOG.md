@@ -8,8 +8,31 @@ commit 哈希对应 GitHub `righttu/pi-harness` 的提交。
 - **命名**：所有组件以 `pi` 开头。Cloudflare 资源名（Worker、网关、路由、变量）用小写 `pi-xxx`；
   代码里的类名用 `PiXxx`（JS 标识符不能带连字符）。给模型用的工具名（`read`、`subagent`…）不算组件，不加前缀。
 - **部署**：推到 `main` 由 Workers Builds 自动部署。Dashboard 里设的普通变量靠 `keep_vars: true` 保留。
-- **Worker 变量**：`CF_ACCOUNT_ID`（Text）、`CF_AIG_TOKEN`（Secret）、`PI_SIDE_ROUTE`（Text，可选，子代理走的路由名）、
-  `PI_PRICE_INPUT` / `PI_PRICE_OUTPUT`（Text，可选，主模型每百万 token 的美元价格，用于成本显示）。
+- **Worker 变量**（都在 `src/server.ts` 顶部 `GatewayEnv` 注释里）：
+  - 必填：`CF_ACCOUNT_ID`（Text）、`CF_AIG_TOKEN`（Secret）
+  - 模型能力：`PI_MODEL_INPUT`（`text` 或 `text,image`，默认 text）、`PI_CONTEXT_WINDOW`（默认 128000）、
+    `PI_MAX_TOKENS`（默认 8192）、`PI_MODEL_REASONING`（`true`/`false`）
+  - 可选：`PI_SIDE_ROUTE`（子代理走的路由名）、`PI_PRICE_INPUT` / `PI_PRICE_OUTPUT`（美元/百万 token）、
+    `PI_PUBLIC_URL`（站点根，分享链接用）、`PI_SHARE_SECRET`（Secret，分享链接签名；不设用 CF_AIG_TOKEN）
+- **R2 桶**：`pi-files`。`shared/` 放发布的文件；`mount/` 下的对象只读挂到每个工作区的 `/workspace/r2`。
+
+---
+
+## 未发布 — R2 发布/分享、模型能力改为变量、聊天贴图
+
+### R2（桶 `pi-files`，绑定 `PI_FILES`）
+- 新工具 `publish(path, expiresSeconds?)`：把工作区文件**流式**复制到 R2 `shared/<uuid>/...`，返回带 HMAC 签名、会过期的链接（默认 24 h，最长 7 天）。系统提示要求产出文件时用它交付。
+- Files 面板预览页加"分享链接"按钮，同一条路径，带复制。
+- 下载路由 `GET /share/<key>?exp=&sig=`，从 R2 流式返回。**注意**：域名上开着 Access，收链接的人也要能登录；要公开分享需给 `/share/*` 加 Access bypass 策略。
+- `/workspace/r2/`：只读挂载桶里 `mount/` 前缀，上限 64 MiB。挂载是 eager 的（启动时复制进 SQLite），只适合模板/参考资料，不适合大文件。
+- 没用官方 `createAssets`（S3 预签名 URL）：它要再建一对 R2 S3 密钥；本方案不需要。以后要公开链接可切过去。
+
+### 模型能力不再写死
+- `input`（看不看图）、`contextWindow`、`maxTokens`、`reasoning` 改为变量 `PI_MODEL_INPUT` / `PI_CONTEXT_WINDOW` / `PI_MAX_TOKENS` / `PI_MODEL_REASONING`。换路由背后的模型只改变量。
+- WebSocket `hello` 多一个 `vision` 字段告诉前端。
+
+### 聊天贴图
+- `PI_MODEL_INPUT=text,image` 时，输入框可粘贴/拖入图片（≤ 4 MB），随消息一起发；用户消息气泡显示图片。模型不支持时不显示入口。
 
 ---
 

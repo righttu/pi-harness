@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { Workspace, type DurableObjectStorageLike } from "@cloudflare/computer";
+import { R2Bucket, Workspace, type DurableObjectStorageLike } from "@cloudflare/computer";
 import { WorkerJavaScriptBackend } from "@cloudflare/computer/backends/worker-javascript";
 import { createGitClient } from "@cloudflare/computer/git";
 import { createGitModule } from "@cloudflare/computer/modules/git";
@@ -18,6 +18,7 @@ import { routeAgentRequest } from "agents";
 import { PiHarness, ROOT_SESSION } from "agents/harness/pi";
 import { Lifecycle } from "agents/lifecycle";
 import { WebSockets } from "agents/websockets";
+import { createPublish, publishFile, verifyShare, type PublishDeps } from "./publish";
 import { PiSessionIndex, splitSessionId } from "./sessions";
 import { PiSessionSockets } from "./sockets";
 import {
@@ -39,11 +40,13 @@ const GATEWAY_ID = "pi-gateway";
 const MODEL_ID = "dynamic/pi-route";
 const PROVIDER_ID = "aigw";
 /**
- * 路由背后模型的上下文窗口。这是 compaction 的分母：上下文超过
- * contextWindow - reserveTokens 就压缩。路由换成小窗口模型要改这里，
- * 否则压缩来不及触发就会 context overflow。
+ * 路由背后模型的上下文窗口默认值（变量 PI_CONTEXT_WINDOW 覆盖）。这是
+ * compaction 的分母：上下文超过 contextWindow - reserveTokens 就压缩。路由
+ * 换成小窗口模型要改，否则压缩来不及触发就会 context overflow。
  */
 const CONTEXT_WINDOW = 128_000;
+/** /workspace/r2 只读挂载最多从桶里复制这么多字节。 */
+const R2_MOUNT_MAX_BYTES = 64 * 1024 * 1024;
 
 /**
  * Worker 变量（Dashboard → Settings → Variables and Secrets）。
@@ -53,6 +56,18 @@ const CONTEXT_WINDOW = 128_000;
  *                   不设则子代理和主 Agent 用同一条路由。
  *   PI_PRICE_INPUT  可选。主模型每百万输入 token 的价格（美元），用于成本显示。
  *   PI_PRICE_OUTPUT 可选。同上，输出 token。不设则只显示 token 数。
+ *
+ * 模型能力——路由背后的模型换了，改这几个变量，不改代码：
+ *   PI_MODEL_INPUT      "text" 或 "text,image"。模型能不能看图。默认 text。
+ *                       设成 text,image 后：read 会把图片/PDF 直接喂给模型，
+ *                       聊天框可以粘贴图片。模型其实不支持的话请求会报错。
+ *   PI_CONTEXT_WINDOW   上下文窗口 token 数，compaction 的分母。默认 128000。
+ *   PI_MAX_TOKENS       单次回答最长 token 数。默认 8192。
+ *   PI_MODEL_REASONING  "true" 表示模型支持 reasoning。默认 false。
+ *
+ *   PI_PUBLIC_URL   可选。站点根（https://pi-agent.example.com），publish 生成
+ *                   链接用。不设就用最近一次连上来的请求的 origin。
+ *   PI_SHARE_SECRET 可选。分享链接的签名密钥（Secret）。不设用 CF_AIG_TOKEN。
  */
 type GatewayEnv = {
   CF_ACCOUNT_ID: string;
@@ -60,7 +75,33 @@ type GatewayEnv = {
   PI_SIDE_ROUTE?: string;
   PI_PRICE_INPUT?: string;
   PI_PRICE_OUTPUT?: string;
+  PI_MODEL_INPUT?: string;
+  PI_CONTEXT_WINDOW?: string;
+  PI_MAX_TOKENS?: string;
+  PI_MODEL_REASONING?: string;
+  PI_PUBLIC_URL?: string;
+  PI_SHARE_SECRET?: string;
 };
+
+/** 从变量读出来的模型能力。 */
+function modelProfile(env: GatewayEnv) {
+  const input = (env.PI_MODEL_INPUT ?? "text")
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s): s is "text" | "image" => s === "text" || s === "image");
+  return {
+    input: input.length === 0 ? (["text"] as const) : input,
+    vision: input.includes("image"),
+    contextWindow: Number(env.PI_CONTEXT_WINDOW) || CONTEXT_WINDOW,
+    maxTokens: Number(env.PI_MAX_TOKENS) || 8192,
+    reasoning: env.PI_MODEL_REASONING === "true"
+  };
+}
+
+/** 分享链接签名密钥。 */
+function shareSecret(env: GatewayEnv): string {
+  return env.PI_SHARE_SECRET || env.CF_AIG_TOKEN;
+}
 
 /** 一个会话（pi session）的状态，GET /api/session/<id>/state 返回。 */
 export type SessionState = {
@@ -159,6 +200,7 @@ How to work:
 - When a step fails, say what failed and what you are trying next; do not silently retry the same thing.
 - Use subagent for one self-contained piece of work you need before continuing. Use subagents to run several independent pieces in parallel while you keep working; their answers arrive as later messages.
 - After writing or changing code, call review with a summary and the file paths before you report it as done. Fix what it finds, then say what the review found and what you fixed.
+- When the result is a file the user wants (a document, slides, an archive, an image), publish it and give the link instead of pasting its contents.
 - Finish with a short summary of what changed, with file paths.`;
 
 /** Playable pi session backed by one Durable Object. */
@@ -170,6 +212,18 @@ export class PiAgent extends DurableObject<Env> {
   readonly workspace = new Workspace({
     storage: this.ctx.storage as unknown as DurableObjectStorageLike,
     git: createGitClient(),
+    // ======================================================================
+    // /workspace/r2：pi-files 桶里 mount/ 前缀下的对象，启动时复制进来，只读。
+    // 注意这是"复制"不是"实时视图"——R2Bucket 挂载是 eager 的，所以只适合
+    // 放模板、参考文档这类小东西；大文件走 publish。
+    // ======================================================================
+    mounts: {
+      "/workspace/r2": R2Bucket(this.env.PI_FILES, {
+        prefix: "mount/",
+        mode: "read-only",
+        maxBytes: R2_MOUNT_MAX_BYTES
+      })
+    },
     backends: [
       new WorkerJavaScriptBackend({
         id: JAVASCRIPT_BACKEND,
@@ -183,6 +237,20 @@ export class PiAgent extends DurableObject<Env> {
   readonly registry = createRegistry();
   /** 工作区工具，harness 工厂里赋值；plan mode 切换时要用。 */
   workspaceTools: ToolRegistration[] = [];
+  /** 最近一次请求的站点根，publish 生成链接用（PI_PUBLIC_URL 优先）。 */
+  #origin: string | undefined;
+  /** publish 工具和 Files 面板"分享"共用。 */
+  get publishDeps(): PublishDeps {
+    const env = this.env as unknown as GatewayEnv;
+    return {
+      workspace: this.workspace,
+      bucket: this.env.PI_FILES,
+      secret: shareSecret(env),
+      object: this.ctx.id.name ?? this.ctx.id.toString(),
+      origin: () => env.PI_PUBLIC_URL?.replace(/\/$/, "") || this.#origin,
+      contentTypeOf
+    };
+  }
   readonly harness = new PiHarness({
     harness: async ({ storage, context, onWake }) => {
       // pi's own extension: the system prompt and the workspace tools.
@@ -211,8 +279,9 @@ export class PiAgent extends DurableObject<Env> {
       // 不走 Workers AI binding，而是用 OpenAI 兼容协议直接打 AI Gateway 的
       // /compat 入口（和 Brain 一样）。这个入口支持 Workers AI、内置供应商和
       // custom provider，所以路由节点换什么模型这里都不用改。
-      const { CF_ACCOUNT_ID, CF_AIG_TOKEN, PI_SIDE_ROUTE, PI_PRICE_INPUT, PI_PRICE_OUTPUT } =
-        this.env as unknown as GatewayEnv;
+      const gatewayEnv = this.env as unknown as GatewayEnv;
+      const { CF_ACCOUNT_ID, CF_AIG_TOKEN, PI_SIDE_ROUTE, PI_PRICE_INPUT, PI_PRICE_OUTPUT } = gatewayEnv;
+      const profile = modelProfile(gatewayEnv);
       // pi 按 cost 字段算每轮花费；单位是美元 / 百万 token。
       const price = {
         input: Number(PI_PRICE_INPUT ?? 0) || 0,
@@ -228,11 +297,11 @@ export class PiAgent extends DurableObject<Env> {
         api: "openai-completions",
         provider: PROVIDER_ID,
         baseUrl,
-        reasoning: false,
-        input: ["text"],
+        reasoning: profile.reasoning,
+        input: [...profile.input],
         cost: price,
-        contextWindow: CONTEXT_WINDOW,
-        maxTokens: 8192,
+        contextWindow: profile.contextWindow,
+        maxTokens: profile.maxTokens,
         headers: { "cf-aig-authorization": `Bearer ${CF_AIG_TOKEN}` },
         compat: { supportsDeveloperRole: false, supportsReasoningEffort: false }
       });
@@ -252,7 +321,8 @@ export class PiAgent extends DurableObject<Env> {
         workspaceTools: this.workspaceTools,
         removeInChild: [subagent, subagents]
       });
-      for (const extension of [subagent, subagents, review, ReviewerRole, Plan]) {
+      const publish = createPublish(this.publishDeps);
+      for (const extension of [subagent, subagents, review, publish, ReviewerRole, Plan]) {
         this.registry.install(extension);
       }
       // ======================================================================
@@ -260,7 +330,7 @@ export class PiAgent extends DurableObject<Env> {
       // 用户打开 plan mode 时加到主对话上（见 setPlanMode）。不写这一条，
       // "默认"就是全部已安装扩展，Plan 的系统提示会一直生效。
       // ======================================================================
-      const defaultExtensions = [playground, subagent, subagents, review];
+      const defaultExtensions = [playground, subagent, subagents, review, publish];
       const gateway = createProvider({
         id: PROVIDER_ID,
         name: "Cloudflare AI Gateway",
@@ -315,8 +385,16 @@ export class PiAgent extends DurableObject<Env> {
   });
 
   // App glue, not the harness: how this app puts sessions on a socket.
-  readonly sockets = new PiSessionSockets(this.harness, this.registry, (tag) =>
-    this.ctx.getWebSockets(tag)
+  readonly sockets = new PiSessionSockets(
+    this.harness,
+    this.registry,
+    (tag) => this.ctx.getWebSockets(tag),
+    {
+      capabilities: () => ({ vision: modelProfile(this.env as unknown as GatewayEnv).vision }),
+      onRequest: (request) => {
+        this.#origin = new URL(request.url).origin;
+      }
+    }
   );
   readonly webSockets = new WebSockets(this.sockets.options());
   readonly lifecycle = Lifecycle.install(this)
@@ -412,6 +490,12 @@ export class PiAgent extends DurableObject<Env> {
     return session.id;
   }
 
+  /** Files 面板"分享"：发布一个文件，返回链接。origin 来自调用方请求。 */
+  async publish(path: string, expiresSeconds: number | undefined, origin: string) {
+    this.#origin = origin;
+    return publishFile(this.publishDeps, normalizeWorkspacePath(path), expiresSeconds);
+  }
+
   /** 会话状态：是否在 plan mode、当前计划、token 用量。 */
   async sessionState(session: string): Promise<SessionState> {
     const pi = await this.harness.pi();
@@ -472,6 +556,8 @@ export class PiAgent extends DurableObject<Env> {
 //   POST   /api/session/<uuid>/fork?session=  fork 一个分支，返回 { id, branch }
 //   GET    /api/session/<uuid>/state?session= { planMode, plan, usage }
 //   POST   /api/session/<uuid>/plan?session=  { on: boolean } 切换 plan mode
+//   POST   /api/session/<uuid>/share?path=&expires=  发布文件，返回 { url, expiresAt }
+//   GET    /share/<key>?exp=&sig=             下载已发布的文件（签名校验）
 //
 // <sid> 是目录项 id（UUID 或 UUID:branch）；?session= 是 pi session id，省略为根。
 // 返回 undefined 表示不归这里管，交给 routeAgentRequest。
@@ -484,6 +570,32 @@ async function handleApi(
   const { method } = request;
   const index = () => env.PiSessionIndex.getByName(ownerOf(request));
   const bad = (message: string, status = 400) => Response.json({ error: message }, { status });
+
+  // 已发布文件的下载。key 形如 shared/<uuid>/<ts>-<name>。
+  if (url.pathname.startsWith("/share/") && method === "GET") {
+    const key = url.pathname
+      .slice("/share/".length)
+      .split("/")
+      .map(decodeURIComponent)
+      .join("/");
+    const exp = Number(url.searchParams.get("exp"));
+    const sig = url.searchParams.get("sig") ?? "";
+    const secret = shareSecret(env as unknown as GatewayEnv);
+    if (!key.startsWith("shared/") || !(await verifyShare(secret, key, exp, sig))) {
+      return bad("Link is invalid or has expired", 403);
+    }
+    const object = await env.PI_FILES.get(key);
+    if (!object) return bad("Not found", 404);
+    const name = key.slice(key.lastIndexOf("/") + 1).replace(/^\d+-/, "");
+    const headers = new Headers();
+    object.writeHttpMetadata(headers);
+    headers.set("etag", object.httpEtag);
+    headers.set("cache-control", "private, no-store");
+    if (url.searchParams.get("inline") !== "1") {
+      headers.set("content-disposition", `attachment; filename*=UTF-8''${encodeURIComponent(name)}`);
+    }
+    return new Response(object.body, { headers });
+  }
 
   if (url.pathname === "/api/sessions") {
     if (method === "GET") return Response.json(await index().list());
@@ -528,7 +640,9 @@ async function handleApi(
     return bad("Method not allowed", 405);
   }
 
-  const match = url.pathname.match(/^\/api\/session\/([^/]+)(\/files|\/file|\/fork|\/state|\/plan)?$/);
+  const match = url.pathname.match(
+    /^\/api\/session\/([^/]+)(\/files|\/file|\/fork|\/state|\/plan|\/share)?$/
+  );
   if (!match) return undefined;
   const id = match[1];
   const sub = match[2];
@@ -588,6 +702,12 @@ async function handleApi(
   }
   if (sub === "/state" && method === "GET") {
     return Response.json(await agent.sessionState(session));
+  }
+  if (sub === "/share" && method === "POST") {
+    const path = url.searchParams.get("path");
+    if (!path) return bad("path required");
+    const expires = Number(url.searchParams.get("expires")) || undefined;
+    return Response.json(await agent.publish(path, expires, url.origin));
   }
   if (sub === "/plan" && method === "POST") {
     const body = (await request.json().catch(() => ({}))) as { on?: boolean };

@@ -1,3 +1,4 @@
+import type { UserInput } from "@earendil-works/pi-durable";
 import { useAgent } from "agents/react";
 import { useCallback, useEffect, useState } from "react";
 import { PiCommandOutbox } from "./outbox";
@@ -15,12 +16,15 @@ type State = SessionView & {
   readonly status: ConnectionStatus;
   /** Every registered tool, from the server's hello. */
   readonly catalog: readonly ToolInfo[];
+  /** 模型能不能看图（服务端 hello 告诉的）。 */
+  readonly vision: boolean;
 };
 
 const INITIAL_STATE: State = {
   ...EMPTY_VIEW,
   status: "connecting",
-  catalog: []
+  catalog: [],
+  vision: false
 };
 
 /**
@@ -64,7 +68,7 @@ export function usePiSession(object: string, branch?: string) {
       outbox.receive(message);
       switch (message.type) {
         case "hello":
-          setState((current) => ({ ...current, catalog: message.tools }));
+          setState((current) => ({ ...current, catalog: message.tools, vision: message.vision }));
           return;
         case "events":
           setState((current) => ({
@@ -106,8 +110,8 @@ export function usePiSession(object: string, branch?: string) {
    * first.
    */
   const submit = useCallback(
-    (text: string, whenBusy: "followUp" | "steer" = "followUp") =>
-      send(outbox.submit(text, whenBusy)),
+    (input: UserInput, whenBusy: "followUp" | "steer" = "followUp") =>
+      send(outbox.submit(input, whenBusy)),
     [send, outbox]
   );
 

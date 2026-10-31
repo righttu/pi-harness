@@ -23,6 +23,7 @@ import {
   MoonIcon,
   PaperPlaneRightIcon,
   GitForkIcon,
+  LinkSimpleIcon,
   ListChecksIcon,
   PencilSimpleIcon,
   PlusIcon,
@@ -685,10 +686,25 @@ function UserMessage({ message }: { message: TranscriptMessage }) {
   if (report) {
     return <SubagentReport name={report[1]} status={report[2]} body={report[3] ?? ""} />;
   }
+  const images = message.parts.filter((part) => part.type === "image");
   return (
     <div className="flex justify-end">
-      <div className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-kumo-contrast px-4 py-2.5 text-sm leading-relaxed text-kumo-inverse">
-        {text}
+      <div className="max-w-[85%] space-y-2 rounded-2xl rounded-br-md bg-kumo-contrast px-4 py-2.5 text-sm leading-relaxed text-kumo-inverse">
+        {images.length > 0 ? (
+          <div className="flex flex-wrap gap-2">
+            {images.map((image, index) =>
+              image.type === "image" ? (
+                <img
+                  key={index}
+                  src={`data:${image.mimeType};base64,${image.data}`}
+                  alt=""
+                  className="max-h-48 max-w-full rounded-lg"
+                />
+              ) : null
+            )}
+          </div>
+        ) : null}
+        {text ? <div className="whitespace-pre-wrap">{text}</div> : null}
       </div>
     </div>
   );
@@ -863,10 +879,28 @@ function FilePreview({
     | { kind: "error"; message: string }
   >({ kind: "loading" });
   const url = `/api/session/${session}/file?path=${encodeURIComponent(path)}`;
+  const [sharing, setSharing] = useState(false);
+  const [shared, setShared] = useState<string | null>(null);
+
+  const share = async () => {
+    setSharing(true);
+    try {
+      const result = await fetchJson<{ url: string }>(
+        `/api/session/${session}/share?path=${encodeURIComponent(path)}`,
+        { method: "POST" }
+      );
+      setShared(result.url);
+    } catch (cause) {
+      window.alert(`分享失败：${cause instanceof Error ? cause.message : String(cause)}`);
+    } finally {
+      setSharing(false);
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
     setState({ kind: "loading" });
+    setShared(null);
     (async () => {
       try {
         const response = await fetch(url);
@@ -916,7 +950,35 @@ function FilePreview({
         >
           <DownloadSimpleIcon size={14} />
         </a>
+        <span title="发布到 R2，生成 24 小时有效的下载链接">
+          <Button
+            variant="ghost"
+            shape="square"
+            size="sm"
+            aria-label="Share link"
+            disabled={sharing}
+            onClick={() => void share()}
+            icon={<LinkSimpleIcon size={14} />}
+          />
+        </span>
       </div>
+      {shared ? (
+        <div className="flex shrink-0 items-center gap-2 border-b border-kumo-line bg-kumo-elevated px-3 py-2 text-xs">
+          <input
+            readOnly
+            value={shared}
+            onFocus={(event) => event.currentTarget.select()}
+            className="min-w-0 flex-1 bg-transparent font-mono text-[11px] outline-none"
+          />
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => void navigator.clipboard.writeText(shared)}
+          >
+            Copy
+          </Button>
+        </div>
+      ) : null}
       <div className="min-h-0 flex-1 overflow-auto p-3">
         {state.kind === "loading" ? (
           <p className="text-xs text-kumo-subtle">Loading…</p>
@@ -1367,6 +1429,7 @@ function App() {
     running,
     tools: runningTools,
     catalog,
+    vision,
     queued,
     retry,
     error,
@@ -1433,12 +1496,44 @@ function App() {
 
   const connected = status === "open";
 
+  // ==========================================================================
+  // 贴图。只在模型能看图时开（服务端 hello 的 vision，由 PI_MODEL_INPUT 决定）。
+  // 粘贴或拖进输入框的图片先放在这里，随下一条消息一起发。
+  // ==========================================================================
+  type Attachment = { id: string; mimeType: string; data: string };
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+
+  const addImages = async (files: Iterable<File>) => {
+    if (!vision) return;
+    for (const file of files) {
+      if (!file.type.startsWith("image/")) continue;
+      if (file.size > MAX_IMAGE_BYTES) {
+        window.alert(`${file.name || "图片"} 超过 4 MB，先压缩一下。`);
+        continue;
+      }
+      const data = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result).split(",")[1] ?? "");
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(file);
+      });
+      setAttachments((list) => [...list, { id: crypto.randomUUID(), mimeType: file.type, data }]);
+    }
+  };
+
   /** While a run is going, Enter queues a follow-up and Steer joins the run. */
   const submit = (whenBusy: "followUp" | "steer" = "followUp") => {
     const text = prompt.trim();
-    if (!text || !connected) return;
+    if ((!text && attachments.length === 0) || !connected) return;
     setPrompt("");
-    submitPrompt(text, whenBusy);
+    setAttachments([]);
+    const content = [
+      ...attachments.map((a) => ({ type: "image" as const, mimeType: a.mimeType, data: a.data })),
+      ...(text ? [{ type: "text" as const, text }] : [])
+    ];
+    // 纯文本还是按字符串发，和以前一样；带图才发内容数组。
+    submitPrompt(attachments.length === 0 ? text : content, whenBusy);
     scrollToBottom();
   };
 
@@ -1825,9 +1920,45 @@ function App() {
             className="mx-auto max-w-3xl px-5 pt-4"
           >
             <div className="flex items-end gap-3 rounded-xl border border-kumo-line bg-kumo-base p-3 shadow-sm transition-shadow focus-within:border-transparent focus-within:ring-2 focus-within:ring-kumo-ring">
+              <div className="flex min-w-0 flex-1 flex-col gap-2">
+                {attachments.length > 0 ? (
+                  <div className="flex flex-wrap gap-2">
+                    {attachments.map((a) => (
+                      <div key={a.id} className="relative">
+                        <img
+                          src={`data:${a.mimeType};base64,${a.data}`}
+                          alt=""
+                          className="h-16 w-16 rounded-lg object-cover ring ring-kumo-line"
+                        />
+                        <button
+                          type="button"
+                          aria-label="Remove image"
+                          onClick={() => setAttachments((list) => list.filter((x) => x.id !== a.id))}
+                          className="absolute -right-1.5 -top-1.5 rounded-full bg-kumo-contrast p-0.5 text-kumo-inverse"
+                        >
+                          <XIcon size={10} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
               <InputArea
                 value={prompt}
                 onValueChange={setPrompt}
+                onPaste={(event) => {
+                  const files = Array.from(event.clipboardData?.files ?? []);
+                  if (files.length > 0 && vision) {
+                    event.preventDefault();
+                    void addImages(files);
+                  }
+                }}
+                onDrop={(event) => {
+                  const files = Array.from(event.dataTransfer?.files ?? []);
+                  if (files.length > 0 && vision) {
+                    event.preventDefault();
+                    void addImages(files);
+                  }
+                }}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" && !event.shiftKey) {
                     event.preventDefault();
@@ -1837,13 +1968,16 @@ function App() {
                 placeholder={
                   running
                     ? "Enter: queue for after this turn · Steer: interrupt it now"
-                    : "Ask Pi to use a tool"
+                    : vision
+                      ? "Ask Pi to use a tool · paste an image to attach it"
+                      : "Ask Pi to use a tool"
                 }
                 aria-label="Message Pi"
                 disabled={!connected}
                 rows={2}
                 className="flex-1 !bg-transparent !shadow-none !ring-0 !outline-none focus:!ring-0"
               />
+              </div>
               {running ? (
                 <div className="mb-0.5 flex gap-1.5">
                   {/* title 就是悬停提示：说明 Steer 和 Enter 的区别 */}
@@ -1858,7 +1992,7 @@ function App() {
                       variant="secondary"
                       size="sm"
                       aria-label="Steer: interrupt the running turn with this message"
-                      disabled={prompt.trim() === ""}
+                      disabled={prompt.trim() === "" && attachments.length === 0}
                       onClick={() => submit("steer")}
                     >
                       Steer
@@ -1879,7 +2013,7 @@ function App() {
                   variant="primary"
                   shape="square"
                   aria-label="Send message"
-                  disabled={!connected || prompt.trim() === ""}
+                  disabled={!connected || (prompt.trim() === "" && attachments.length === 0)}
                   icon={<PaperPlaneRightIcon size={18} />}
                   className="mb-0.5"
                 />

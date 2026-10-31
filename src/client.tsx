@@ -33,7 +33,7 @@ import { usePiSession } from "./use-pi-session";
 import "./styles.css";
 
 const SESSION_KEY = "pi-harness-session";
-const MODEL = "@cf/zai-org/glm-5.3-flash";
+const MODEL = "dynamic/pi-route";
 
 const SUGGESTIONS = [
   {

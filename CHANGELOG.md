@@ -19,6 +19,13 @@ commit 哈希对应 GitHub `righttu/pi-harness` 的提交。
 
 ---
 
+## 未发布
+
+### 修复
+- `publish` 报 `Provided readable stream must have a known length`：R2 `put()` 要求流有已知长度，工作区流没有。用 `FixedLengthStream(size)` 包一层。
+
+---
+
 ## d5db29b — 2026-10-31 — 上传/下载流式、fetch 工具
 
 ### 上传 / 下载改流式

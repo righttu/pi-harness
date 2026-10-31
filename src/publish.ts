@@ -76,7 +76,10 @@ export async function publishFile(
   if (!stat.isFile) throw new Error(`Not a file: ${path}`);
   const name = path.slice(path.lastIndexOf("/") + 1);
   const key = `shared/${deps.object}/${Date.now()}-${name}`;
-  const stream = await deps.workspace.fs.readFile(path);
+  // R2 put() 要求流有已知长度；工作区的流没有，用 stat 的大小套一层。
+  const stream = (await deps.workspace.fs.readFile(path)).pipeThrough(
+    new FixedLengthStream(stat.size)
+  );
   await deps.bucket.put(key, stream, {
     httpMetadata: { contentType: deps.contentTypeOf(path) },
     customMetadata: { source: path, object: deps.object }

@@ -1,0 +1,33 @@
+CHANGELOG.md
+  s_6f18dd121ce268::t_5f797c85fbf526 11-35
+env.d.ts
+  s_6f18dd121ce268::t_fc9a634047b940 2,4
+src/client.tsx
+  s_6f18dd121ce268::t_1502da2bdff626 26,689,692-707,882-898,903,953-963,965-981,1432,1499-1524,1528,1530-1536,1923-1944,1948-1961,1971-1973,1980,1995,2016
+src/protocol.ts
+  s_6f18dd121ce268::t_a1fd42892ad727 35-36
+src/server.ts
+  s_6f18dd121ce268::t_4f69f32a777fb3 2,21,43-45,48-49,59-70,78-83,86-105,203,215-226,240-253,282-284,300-301,303-304,324-325,333,388-397,493-498,559-560,574-599,643-645,706-711
+src/sockets.ts
+  s_6f18dd121ce268::t_c3ce94773639d6 60-67,72,79-80,85,123,127
+src/use-pi-session.ts
+  s_6f18dd121ce268::t_d8ee3e683c7398 1,19-20,26-27,71,113-114
+wrangler.jsonc
+  s_6f18dd121ce268::t_8f897e596c05be 14-16
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "7712d9837235a32e814cccf856d9c90429cb8699",
+  "prompts": {},
+  "sessions": {
+    "s_6f18dd121ce268": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_e73ba4895ffegcjq23ifMtMG44",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    }
+  }
+}

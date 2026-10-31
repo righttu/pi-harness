@@ -12,7 +12,7 @@ commit 哈希对应 GitHub `righttu/pi-harness` 的提交。
 
 ---
 
-## 未发布
+## 4062dc6 — 2026-10-31 — Files 空目录修复、sidekick 路由预埋、变更记录
 
 ### 修复
 - Files 面板在新会话里报 `400 no such path: /workspace`。原因是还没写过文件时目录不存在；现在当作空目录显示 "Empty"。

@@ -1,7 +1,8 @@
 # 变更记录
 
 每次推送到 `main` 都在这里加一条：改了什么、为什么、对使用的影响。最新的在最上面。
-commit 哈希对应 GitHub `righttu/pi-harness` 的提交。
+条目按日期 + 标题命名；对应的 commit 看 `git log`（标题就是 commit 第一行的中文说明）。
+一次推送只含一个 commit——连推两个会让 Workers Builds 撞 Cloudflare API 限流（code 971）。
 
 ## 项目约定
 
@@ -19,14 +20,14 @@ commit 哈希对应 GitHub `righttu/pi-harness` 的提交。
 
 ---
 
-## faa28f2 — 2026-10-31 — publish 流长度修复
+## 2026-10-31 — publish 流长度修复
 
 ### 修复
 - `publish` 报 `Provided readable stream must have a known length`：R2 `put()` 要求流有已知长度，工作区流没有。用 `FixedLengthStream(size)` 包一层。
 
 ---
 
-## d5db29b — 2026-10-31 — 上传/下载流式、fetch 工具
+## 2026-10-31 — 上传/下载流式、fetch 工具
 
 ### 上传 / 下载改流式
 - `readFile` / `writeFile` RPC 直接传 `ReadableStream`（Workers RPC 原生支持，带流控，不受 32 MiB 限制）。文件不再进内存。
@@ -40,7 +41,7 @@ commit 哈希对应 GitHub `righttu/pi-harness` 的提交。
 
 ---
 
-## 7712d98 — 2026-10-31 — R2 发布/分享、模型能力改为变量、聊天贴图
+## 2026-10-31 — R2 发布/分享、模型能力改为变量、聊天贴图
 
 ### R2（桶 `pi-files`，绑定 `PI_FILES`）
 - 新工具 `publish(path, expiresSeconds?)`：把工作区文件**流式**复制到 R2 `shared/<uuid>/...`，返回带 HMAC 签名、会过期的链接（默认 24 h，最长 7 天）。系统提示要求产出文件时用它交付。
@@ -58,7 +59,7 @@ commit 哈希对应 GitHub `righttu/pi-harness` 的提交。
 
 ---
 
-## ceb6f24 — 2026-10-31 — 新会话 /workspace 不存在、Plan mode 提示
+## 2026-10-31 — 新会话 /workspace 不存在、Plan mode 提示
 
 ### 修复
 - 新会话里模型的 `ls` / `find` 报 `no such path: /workspace`：对象启动时先 `mkdir /workspace`。之前只修了 Files 面板，没修模型这边。
@@ -66,7 +67,7 @@ commit 哈希对应 GitHub `righttu/pi-harness` 的提交。
 
 ---
 
-## 52211ce — 2026-10-31 — 文件上传、会话分支、预览渲染、成本显示、Reviewer、Plan mode
+## 2026-10-31 — 文件上传、会话分支、预览渲染、成本显示、Reviewer、Plan mode
 
 ### 文件上传
 - Files 面板加上传按钮（可多选），传到当前目录，同名覆盖。`PUT /api/session/<uuid>/file?path=`，单文件上限 20 MiB。
@@ -96,7 +97,7 @@ commit 哈希对应 GitHub `righttu/pi-harness` 的提交。
 
 ---
 
-## 4062dc6 — 2026-10-31 — Files 空目录修复、sidekick 路由预埋、变更记录
+## 2026-10-31 — Files 空目录修复、sidekick 路由预埋、变更记录
 
 ### 修复
 - Files 面板在新会话里报 `400 no such path: /workspace`。原因是还没写过文件时目录不存在；现在当作空目录显示 "Empty"。
@@ -109,12 +110,12 @@ commit 哈希对应 GitHub `righttu/pi-harness` 的提交。
 
 ---
 
-## 6f202a7 — 2026-10-31 — DO 改名 SessionIndex → PiSessionIndex
+## 2026-10-31 — DO 改名 SessionIndex → PiSessionIndex
 
 - 按命名规则改名。用迁移 `v3` 的 `renamed_classes` 改，已有数据保留。
 - 影响：Dashboard → Durable Objects 里应看到 `PiAgent` 和 `PiSessionIndex` 两个 namespace。
 
-## ab6b274 — 2026-10-31 — 会话目录上服务端、文件面板、并行子代理、上下文策略
+## 2026-10-31 — 会话目录上服务端、文件面板、并行子代理、上下文策略
 
 ### 会话目录存服务端（`src/sessions.ts`）
 - 新增 DO `PiSessionIndex`（当时叫 SessionIndex），SQLite 一张表存会话列表。
@@ -139,7 +140,7 @@ commit 哈希对应 GitHub `righttu/pi-harness` 的提交。
 - 系统提示加工作规则：先 ls 再动手、改前先 read、大文件分段、分步汇报、失败说明、何时用哪种子代理、收尾总结。
 - Steer 按钮悬停说明；运行中 placeholder 改为 `Enter: queue · Steer: interrupt`。
 
-## 1c45e07 — 2026-10-31 — 会话左栏、跟随滚动、真实子代理进度
+## 2026-10-31 — 会话左栏、跟随滚动、真实子代理进度
 
 - 会话列表从标题栏下拉改为左侧一列，每行可改名、可删除（不必先切过去）。第一条消息自动成为标题。
 - 删除改为乐观更新，失败恢复。
@@ -147,21 +148,21 @@ commit 哈希对应 GitHub `righttu/pi-harness` 的提交。
 - `subagent` 工具用 `api.watchDoc(LiveDoc, child)` 盯子对话，把每次模型请求、每个工具开始/结束流到父对话卡片（`api.output()`），完成后步骤表进 `details.steps`。替换之前写死的三步占位。
 - 工具卡片按 `callId` 匹配运行槽位（之前按名字且只对 live 消息生效，导致已提交消息里的工具调用永远显示 Called）。
 
-## 0383c1b — 2026-10-31 — 子代理卡片
+## 2026-10-31 — 子代理卡片
 
 - `subagent` 工具调用/结果使用专门的卡片，显示任务、状态、子对话 id。（步骤条此时为占位，1c45e07 换成真实数据。）
 
-## fc55c83 — 2026-10-31 — 保留 Dashboard 变量
+## 2026-10-31 — 保留 Dashboard 变量
 
 - `wrangler.jsonc` 加 `keep_vars: true`。此前每次部署会清掉 Dashboard 设的普通变量（`CF_ACCOUNT_ID`），导致 401。Secret 不受影响。
 
-## 1803af1 — 2026-10-31 — 会话列表 + 删除、前台子代理
+## 2026-10-31 — 会话列表 + 删除、前台子代理
 
 - 客户端在 localStorage 维护会话目录，可切换、新建、删除当前会话。
 - `DELETE /api/session/<uuid>` → `PiAgent.destroy()`：关 WebSocket、dispose、清 alarm、`storage.deleteAll()`、abort。
 - 新增 `src/subagent.ts`：前台 `subagent` 工具，在同一 DO 内开子对话、等答案、返回。子对话不再拥有 `subagent` 工具。
 
-## ba72daf — 2026-10-31 — 模型改走 AI Gateway /compat
+## 2026-10-31 — 模型改走 AI Gateway /compat
 
 - 不再用 Workers AI binding（它不能解析指向 custom provider 的动态路由，报 `no_model` / `model_error`）。
 - 改为 Pi AI 自定义 provider，OpenAI 兼容协议打 `gateway.ai.cloudflare.com/v1/<账号>/pi-gateway/compat`，带 `cf-aig-authorization`。

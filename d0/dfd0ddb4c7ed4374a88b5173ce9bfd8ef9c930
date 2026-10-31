@@ -1,0 +1,19 @@
+CHANGELOG.md
+  s_6f18dd121ce268::t_81d2c4e3e53610 4-5,23,30,44,62,70,100,113,118,143,151,155,159,165
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d0dfd0ddb4c7ed4374a88b5173ce9bfd8ef9c930",
+  "prompts": {},
+  "sessions": {
+    "s_6f18dd121ce268": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_e73ba4895ffegcjq23ifMtMG44",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    }
+  }
+}

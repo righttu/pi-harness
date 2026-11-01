@@ -1,0 +1,31 @@
+CHANGELOG.md
+  s_6f18dd121ce268::t_959cb9603ed692 13-14,21-30
+src/client.tsx
+  s_6f18dd121ce268::t_f3373a4c41c11e 1275-1307,1333-1334,1341
+src/publish.ts
+  s_6f18dd121ce268::t_008c251212c477 27-28,88
+src/server.ts
+  s_6f18dd121ce268::t_f1894ec037435a 9,50-56,58-59,71,74,95,271-274,277-278,292-295,321,333-339,344-348,362,364-365,397,404,475-476,478-479,671,696,708-712
+src/sockets.ts
+  s_6f18dd121ce268::t_a852b779f4da5a 64-65,123
+src/tests/route-model.test.ts
+  s_6f18dd121ce268::t_89b947c3fabdef 1-36
+src/tests/settings.test.ts
+  s_6f18dd121ce268::t_3edb789a033d4c 51-64
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "500b8a4facb535910579f1457463af6c060dd61b",
+  "prompts": {},
+  "sessions": {
+    "s_6f18dd121ce268": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_e73ba4895ffegcjq23ifMtMG44",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    }
+  }
+}

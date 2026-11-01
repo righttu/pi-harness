@@ -21,7 +21,14 @@ import { WebSockets } from "agents/websockets";
 import { createFetchTool, parseAllowList } from "./fetch-tool";
 import { createPublish, publishFile, verifyShare, type PublishDeps } from "./publish";
 import { PiSessionIndex, splitSessionId } from "./sessions";
-import { PiSettings, SETTABLE, SETTINGS_NAME } from "./settings";
+import {
+  effectiveSettings,
+  PiSettings,
+  SETTABLE,
+  SETTINGS,
+  SETTINGS_NAME,
+  type SettingsMap
+} from "./settings";
 import { PiSessionSockets } from "./sockets";
 import {
   createReview,
@@ -51,108 +58,56 @@ const CONTEXT_WINDOW = 128_000;
 const R2_MOUNT_MAX_BYTES = 64 * 1024 * 1024;
 
 /**
- * Worker 变量（Dashboard → Settings → Variables and Secrets）。
- *   CF_ACCOUNT_ID   账号 id（Text）
- *   CF_AIG_TOKEN    AI Gateway token（Secret）
- *   PI_SIDE_ROUTE   可选。子代理（sidekick）走的动态路由名，比如 "pi-side"。
- *                   不设则子代理和主 Agent 用同一条路由。
- *   PI_PRICE_INPUT  可选。主模型每百万输入 token 的价格（美元），用于成本显示。
- *   PI_PRICE_OUTPUT 可选。同上，输出 token。不设则只显示 token 数。
+ * Dashboard 里只设这三样（Settings → Variables and Secrets）：
+ *   CF_ACCOUNT_ID    账号 id（Text）。必填。
+ *   CF_AIG_TOKEN     AI Gateway token（Secret）。必填。
+ *   PI_SHARE_SECRET  可选（Secret）。分享链接的签名密钥；不设用 CF_AIG_TOKEN。
+ *                    单独设的好处：换 AIG token 时旧分享链接不失效。
  *
- * 模型能力——路由背后的模型换了，改这几个变量，不改代码：
- *   PI_MODEL_INPUT      "text" 或 "text,image"。模型能不能看图。默认 text。
- *                       设成 text,image 后：read 会把图片/PDF 直接喂给模型，
- *                       聊天框可以粘贴图片。模型其实不支持的话请求会报错。
- *   PI_CONTEXT_WINDOW   上下文窗口 token 数，compaction 的分母。默认 128000。
- *   PI_MAX_TOKENS       单次回答最长 token 数。默认 8192。
- *   PI_MODEL_REASONING  "true" 表示模型支持 reasoning。默认 false。
- *
- *   PI_FETCH_ALLOW  可选。fetch 工具允许访问的主机名，逗号分隔，后缀匹配；
- *                   "*" 放行全部。默认 "*"。对外开放时建议收紧。
- *   PI_PUBLIC_URL   可选。站点根（https://pi-agent.example.com），publish 生成
- *                   链接用。不设就用最近一次连上来的请求的 origin。
- *   PI_SHARE_SECRET 可选。分享链接的签名密钥（Secret）。不设用 CF_AIG_TOKEN。
+ * 其余 PI_* 配置在右栏 Config 页改，定义和默认值见 src/settings.ts 的 SETTINGS。
+ * 合并后的生效配置是 GatewayEnv（PiAgent.#config）。
  */
 type GatewayEnv = {
   CF_ACCOUNT_ID: string;
   CF_AIG_TOKEN: string;
-  PI_SIDE_ROUTE?: string;
-  PI_PRICE_INPUT?: string;
-  PI_PRICE_OUTPUT?: string;
+  PI_SHARE_SECRET?: string;
   PI_MODEL_INPUT?: string;
   PI_CONTEXT_WINDOW?: string;
   PI_MAX_TOKENS?: string;
   PI_MODEL_REASONING?: string;
-  PI_PUBLIC_URL?: string;
-  PI_SHARE_SECRET?: string;
+  PI_SIDE_ROUTE?: string;
+  PI_PRICE_INPUT?: string;
+  PI_PRICE_OUTPUT?: string;
   PI_FETCH_ALLOW?: string;
+  PI_PUBLIC_URL?: string;
 };
 
-/**
- * 全部可配置变量的说明书。右栏 Config 标签页显示它，所以换模型时不用翻代码。
- * 加新变量时在这里补一条。
- */
-export type ConfigItem = {
-  name: string;
-  /** 当前生效的值（Secret 只显示是否已设）。 */
-  value: string;
-  /** 来自应用内设置、Dashboard 变量，还是默认值。 */
-  source: "app" | "variable" | "default";
-  defaultValue: string;
-  secret?: boolean;
-  /** 能不能在应用内改（密钥和账号 id 不能）。 */
-  settable: boolean;
-  description: string;
-};
-
-/**
- * 把 Dashboard 变量和应用内设置合并成一份生效配置。应用内设置优先。
- * 只有 SETTABLE 里的 key 会被应用内设置覆盖。
- */
-export function resolveConfig(env: GatewayEnv, overrides: Record<string, string>): GatewayEnv {
-  const merged: Record<string, string | undefined> = { ...env };
-  for (const [key, value] of Object.entries(overrides)) {
-    if (SETTABLE.has(key) && value !== "") merged[key] = value;
-  }
-  return merged as unknown as GatewayEnv;
+/** 密钥 + 应用内设置（含默认值）→ 生效配置。Dashboard 里的 PI_* 变量不参与。 */
+export function resolveConfig(env: Env, saved: SettingsMap): GatewayEnv {
+  const infra = env as unknown as Pick<GatewayEnv, "CF_ACCOUNT_ID" | "CF_AIG_TOKEN" | "PI_SHARE_SECRET">;
+  return {
+    CF_ACCOUNT_ID: infra.CF_ACCOUNT_ID,
+    CF_AIG_TOKEN: infra.CF_AIG_TOKEN,
+    ...(infra.PI_SHARE_SECRET ? { PI_SHARE_SECRET: infra.PI_SHARE_SECRET } : {}),
+    ...effectiveSettings(saved)
+  } as GatewayEnv;
 }
 
-export function describeConfig(env: GatewayEnv, overrides: Record<string, string>): ConfigItem[] {
-  const item = (
-    name: keyof GatewayEnv,
-    defaultValue: string,
-    description: string,
-    options: { secret?: boolean } = {}
-  ): ConfigItem => {
-    const settable = SETTABLE.has(name);
-    const fromApp = settable ? overrides[name] : undefined;
-    const raw = fromApp !== undefined && fromApp !== "" ? fromApp : env[name];
-    const set = raw !== undefined && raw !== "";
-    return {
-      name,
-      value: options.secret ? (set ? "（已设置）" : "（未设置）") : set ? String(raw) : defaultValue,
-      source: fromApp !== undefined && fromApp !== "" ? "app" : set ? "variable" : "default",
-      defaultValue: options.secret ? "" : defaultValue,
-      ...(options.secret ? { secret: true } : {}),
-      settable,
-      description
-    };
-  };
-  const profile = modelProfile(resolveConfig(env, overrides));
-  return [
-    item("CF_ACCOUNT_ID", "", "Cloudflare 账号 id。必填。"),
-    item("CF_AIG_TOKEN", "", "AI Gateway token。必填。", { secret: true }),
-    item("PI_MODEL_INPUT", "text", "模型能看什么：text 或 text,image。设成 text,image 后聊天框可贴图、read 会把图片/PDF 喂给模型。路由换成多模态模型时改。"),
-    item("PI_CONTEXT_WINDOW", String(CONTEXT_WINDOW), `上下文窗口（token）。决定什么时候压缩对话。当前生效 ${profile.contextWindow}。路由换成不同窗口的模型时改。`),
-    item("PI_MAX_TOKENS", "8192", "模型单次回答的最大长度（token）。只是上限，不会让回答变长。"),
-    item("PI_MODEL_REASONING", "false", "模型是否是思考型（qwen3-thinking、DeepSeek-R1、o 系列）。影响 pi 怎么请求和展示思考内容。"),
-    item("PI_SIDE_ROUTE", "", "子代理（subagent / subagents / review）走的 AI Gateway 动态路由名，如 pi-side。不设则和主 Agent 同一条路由。"),
-    item("PI_PRICE_INPUT", "0", "主模型每百万输入 token 的美元价格，用于标题栏成本显示。"),
-    item("PI_PRICE_OUTPUT", "0", "主模型每百万输出 token 的美元价格。"),
-    item("PI_FETCH_ALLOW", "*", "fetch 工具允许访问的主机名，逗号分隔，后缀匹配。* 放行全部。对外开放前建议收紧。"),
-    item("PI_PUBLIC_URL", "（最近一次请求的 origin）", "分享链接用的站点根，如 https://pi-agent.example.com。一般不用设。"),
-    item("PI_SHARE_SECRET", "", "分享链接的签名密钥。不设用 CF_AIG_TOKEN。", { secret: true })
-  ];
+/** Config 页的一行：定义 + 当前值。 */
+export type ConfigItem = (typeof SETTINGS)[number] & {
+  /** 当前生效的值。 */
+  value: string;
+  /** 用的是默认值，还是应用内改过。 */
+  isDefault: boolean;
+};
+
+export function describeConfig(saved: SettingsMap): ConfigItem[] {
+  const effective = effectiveSettings(saved);
+  return SETTINGS.map((def) => ({
+    ...def,
+    value: effective[def.name],
+    isDefault: saved[def.name] === undefined
+  }));
 }
 
 /** 从变量读出来的模型能力。 */
@@ -315,13 +270,13 @@ export class PiAgent extends DurableObject<Env> {
    * 载入；Config 页改了之后 Worker 调 refreshConfig() 更新。读配置的地方一律
    * 通过 this.#config，不直接读 this.env，这样改动才能生效。
    */
-  #config: GatewayEnv = this.env as unknown as GatewayEnv;
+  #config: GatewayEnv = resolveConfig(this.env, {});
   /** pi 的模型目录。换配置时重新 setProvider，同一个对象，pi 每次请求都从这里读。 */
   readonly models = createModels();
 
   async #loadConfig(): Promise<void> {
-    const overrides = await this.env.PiSettings.getByName(SETTINGS_NAME).all();
-    this.#config = resolveConfig(this.env as unknown as GatewayEnv, overrides);
+    const saved = await this.env.PiSettings.getByName(SETTINGS_NAME).all();
+    this.#config = resolveConfig(this.env, saved);
   }
 
   /**
@@ -699,7 +654,7 @@ async function handleApi(
       .join("/");
     const exp = Number(url.searchParams.get("exp"));
     const sig = url.searchParams.get("sig") ?? "";
-    const secret = shareSecret(env as unknown as GatewayEnv);
+    const secret = shareSecret(resolveConfig(env, {}));
     if (!key.startsWith("shared/") || !(await verifyShare(secret, key, exp, sig))) {
       return bad("Link is invalid or has expired", 403);
     }
@@ -719,9 +674,7 @@ async function handleApi(
   // 当前生效的配置和每个变量的说明（右栏 Config 标签页）；PATCH 改应用内设置。
   if (url.pathname === "/api/config") {
     const settings = env.PiSettings.getByName(SETTINGS_NAME);
-    if (method === "GET") {
-      return Response.json(describeConfig(env as unknown as GatewayEnv, await settings.all()));
-    }
+    if (method === "GET") return Response.json(describeConfig(await settings.all()));
     if (method === "PATCH") {
       const body = (await request.json().catch(() => ({}))) as {
         key?: string;
@@ -729,12 +682,12 @@ async function handleApi(
         /** 当前打开的会话对象，改完让它立刻重载配置；其他对象重启后生效。 */
         object?: string;
       };
-      if (!body.key || !SETTABLE.has(body.key)) return bad("Unknown or protected setting");
-      const overrides = await settings.set(body.key, body.value ?? null);
+      if (!body.key || !SETTABLE.has(body.key)) return bad("Unknown setting");
+      const saved = await settings.set(body.key, body.value ?? null);
       if (body.object && UUID.test(body.object)) {
         await env.PiAgent.getByName(body.object).refreshConfig();
       }
-      return Response.json(describeConfig(env as unknown as GatewayEnv, overrides));
+      return Response.json(describeConfig(saved));
     }
     return bad("Method not allowed", 405);
   }

@@ -9,16 +9,21 @@
 - **命名**：所有组件以 `pi` 开头。Cloudflare 资源名（Worker、网关、路由、变量）用小写 `pi-xxx`；
   代码里的类名用 `PiXxx`（JS 标识符不能带连字符）。给模型用的工具名（`read`、`subagent`…）不算组件，不加前缀。
 - **部署**：推到 `main` 由 Workers Builds 自动部署。Dashboard 里设的普通变量靠 `keep_vars: true` 保留。
-- **配置**：右栏 **Config** 页可直接改 `PI_*` 非密钥项，存在 `PiSettings` DO 里，优先于 Dashboard 变量。
-  密钥（`CF_AIG_TOKEN`、`PI_SHARE_SECRET`）和 `CF_ACCOUNT_ID` 只能在 Dashboard 设。
-- **Worker 变量**（都在 `src/server.ts` 顶部 `GatewayEnv` 注释里，Config 页也列着）：
-  - 必填：`CF_ACCOUNT_ID`（Text）、`CF_AIG_TOKEN`（Secret）
-  - 模型能力：`PI_MODEL_INPUT`（`text` 或 `text,image`，默认 text）、`PI_CONTEXT_WINDOW`（默认 128000）、
-    `PI_MAX_TOKENS`（默认 8192）、`PI_MODEL_REASONING`（`true`/`false`）
-  - 可选：`PI_SIDE_ROUTE`（子代理走的路由名）、`PI_PRICE_INPUT` / `PI_PRICE_OUTPUT`（美元/百万 token）、
-    `PI_PUBLIC_URL`（站点根，分享链接用）、`PI_SHARE_SECRET`（Secret，分享链接签名；不设用 CF_AIG_TOKEN）、
-    `PI_FETCH_ALLOW`（fetch 工具域名白名单，逗号分隔，默认 `*`）
+- **配置分两处**：
+  - **Dashboard 只放密钥**（Settings → Variables and Secrets）：`CF_ACCOUNT_ID`（必填）、`CF_AIG_TOKEN`（Secret，必填）、
+    `PI_SHARE_SECRET`（Secret，可选：分享链接签名密钥，不设用 CF_AIG_TOKEN；单独设则换 AIG token 时旧链接不失效）。
+  - **其余 `PI_*` 在右栏 Config 页改**，存 `PiSettings` DO，没改的用默认值。定义见 `src/settings.ts` 的 `SETTINGS`。
+    Dashboard 里的 `PI_*` 变量不再参与（首次启动会一次性搬进应用内设置，之后可删）。
 - **R2 桶**：`pi-files`。`shared/` 放发布的文件；`mount/` 下的对象只读挂到每个工作区的 `/workspace/r2`。
+
+---
+
+## 2026-10-31 — 设置两层化、Config 页重做
+
+- 去掉"Dashboard 变量"这一层：`PI_*` 配置只有 应用内 > 默认 两层。`PiSettings` 首次启动把 Dashboard 里已有的 `PI_*` 一次性搬进来（标记 `__seeded__`），之后不再读。
+- 设置项定义集中到 `src/settings.ts` 的 `SETTINGS`（名字、标签、类型、默认值、说明），服务端合并和前端表单都从它来。加设置项只改这里。
+- Config 页：只显示可改项；输入框直接显示当前生效值；`PI_MODEL_INPUT`、`PI_MODEL_REASONING` 是下拉；数字项数字输入；改过的有"恢复默认"。保存时服务端校验（枚举、数字范围）。
+- 密钥一行说明在 Dashboard，不再列出。
 
 ---
 

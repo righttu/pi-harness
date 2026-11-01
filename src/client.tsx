@@ -1166,26 +1166,22 @@ function FilesPanel({ session, refreshKey }: { session: string; refreshKey: numb
 }
 
 // ============================================================================
-// Config 标签页：每个 Worker 变量的名字、当前值、默认值、含义。
-// 数据来自 GET /api/config（server.ts 的 describeConfig）。换模型时看这里。
+// Config 标签页：应用内设置。每行是 src/settings.ts 里的一个 SettingDef + 当前值。
+// 下拉 / 数字 / 文本按 kind 决定；改过的项有"恢复默认"。保存后当前会话立刻生效。
 // ============================================================================
 type ConfigItem = {
   name: string;
-  value: string;
-  source: "app" | "variable" | "default";
+  label: string;
   defaultValue: string;
-  secret?: boolean;
-  settable: boolean;
   description: string;
-};
+  value: string;
+  isDefault: boolean;
+} & (
+  | { kind: "select"; options: readonly { value: string; label: string }[] }
+  | { kind: "number"; min?: number; max?: number }
+  | { kind: "text"; placeholder?: string }
+);
 
-const SOURCE_LABEL: Record<ConfigItem["source"], string> = {
-  app: "应用内",
-  variable: "Dashboard",
-  default: "默认"
-};
-
-/** 一行可编辑的设置。 */
 function ConfigRow({
   item,
   onSave
@@ -1193,11 +1189,10 @@ function ConfigRow({
   item: ConfigItem;
   onSave: (key: string, value: string | null) => Promise<void>;
 }) {
-  const [draft, setDraft] = useState(item.source === "app" ? item.value : "");
+  const [draft, setDraft] = useState(item.value);
   const [busy, setBusy] = useState(false);
-  useEffect(() => {
-    setDraft(item.source === "app" ? item.value : "");
-  }, [item.value, item.source]);
+  useEffect(() => setDraft(item.value), [item.value]);
+  const dirty = draft.trim() !== item.value;
   const save = async (value: string | null) => {
     setBusy(true);
     try {
@@ -1206,60 +1201,73 @@ function ConfigRow({
       setBusy(false);
     }
   };
+  const inputClass =
+    "min-w-0 flex-1 rounded border border-kumo-line bg-kumo-base px-2 py-1 text-xs outline-none focus:border-kumo-ring disabled:opacity-60";
   return (
     <Surface className="rounded-lg p-3 ring ring-kumo-line">
       <div className="flex items-center gap-2">
-        <code className="min-w-0 flex-1 truncate text-xs font-semibold">{item.name}</code>
-        <Badge variant={item.source === "default" ? "secondary" : "success"}>
-          {SOURCE_LABEL[item.source]}
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-xs font-semibold">{item.label}</div>
+          <code className="text-[10px] text-kumo-inactive">{item.name}</code>
+        </div>
+        <Badge variant={item.isDefault ? "secondary" : "success"}>
+          {item.isDefault ? "默认" : "已改"}
         </Badge>
       </div>
       <p className="mt-1 text-xs leading-5 text-kumo-subtle">{item.description}</p>
-      {item.settable ? (
-        <div className="mt-2 flex items-center gap-1.5">
-          <input
+      <div className="mt-2 flex items-center gap-1.5">
+        {item.kind === "select" ? (
+          <select
             value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") void save(draft);
-            }}
-            placeholder={item.value || item.defaultValue || "—"}
             disabled={busy}
-            className="min-w-0 flex-1 rounded border border-kumo-line bg-kumo-base px-2 py-1 font-mono text-[11px] outline-none focus:border-kumo-ring"
-          />
-          <Button
-            variant="secondary"
-            size="sm"
-            disabled={busy || draft.trim() === "" || draft === (item.source === "app" ? item.value : "")}
-            onClick={() => void save(draft)}
+            onChange={(event) => void save(event.target.value)}
+            className={inputClass}
           >
-            Save
-          </Button>
-          {item.source === "app" ? (
-            <Button
-              variant="ghost"
-              shape="square"
-              size="sm"
-              aria-label="Reset to variable/default"
-              title="清掉应用内的值，回到 Dashboard 变量或默认值"
+            {item.options.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+                {option.value === item.defaultValue ? "（默认）" : ""}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <>
+            <input
+              type={item.kind === "number" ? "number" : "text"}
+              value={draft}
+              min={item.kind === "number" ? item.min : undefined}
+              max={item.kind === "number" ? item.max : undefined}
+              placeholder={item.kind === "text" ? item.placeholder : undefined}
               disabled={busy}
-              onClick={() => void save(null)}
-              icon={<XIcon size={12} />}
+              onChange={(event) => setDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && dirty) void save(draft);
+              }}
+              className={`${inputClass} font-mono`}
             />
-          ) : null}
-        </div>
-      ) : (
-        <div className="mt-1 break-all font-mono text-[11px] text-kumo-default">
-          {item.value || "—"}
-          <span className="ml-2 text-kumo-inactive">（只能在 Dashboard 设）</span>
-        </div>
-      )}
-      {item.settable && item.source !== "app" ? (
-        <p className="mt-1 text-[10px] text-kumo-inactive">
-          当前生效：<span className="font-mono">{item.value || "—"}</span>
-          {item.source === "variable" && item.defaultValue ? `（默认 ${item.defaultValue}）` : ""}
-        </p>
-      ) : null}
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={busy || !dirty}
+              onClick={() => void save(draft)}
+            >
+              Save
+            </Button>
+          </>
+        )}
+        {!item.isDefault ? (
+          <Button
+            variant="ghost"
+            shape="square"
+            size="sm"
+            aria-label="Reset to default"
+            title={`恢复默认${item.defaultValue ? `：${item.defaultValue}` : "（空）"}`}
+            disabled={busy}
+            onClick={() => void save(null)}
+            icon={<ArrowsClockwiseIcon size={12} />}
+          />
+        ) : null}
+      </div>
     </Surface>
   );
 }
@@ -1289,8 +1297,8 @@ function ConfigPanel({ object }: { object: string }) {
   return (
     <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
       <p className="px-1 text-[11px] leading-5 text-kumo-subtle">
-        在这里改的值立刻对当前会话生效（其他会话下次启动时生效），优先于 Dashboard 变量。
-        清掉就回到 Dashboard 变量或默认值。密钥只能在 Dashboard 设。
+        改了立刻对当前会话生效，其他会话下次启动时生效。密钥（账号 id、AI Gateway
+        token）在 Dashboard 的 Variables and Secrets 里。
       </p>
       {error ? <p className="px-1 text-xs text-kumo-danger">{error}</p> : null}
       {items === null && !error ? <p className="px-1 text-xs text-kumo-subtle">Loading…</p> : null}

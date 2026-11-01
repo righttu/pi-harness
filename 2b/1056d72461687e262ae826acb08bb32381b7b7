@@ -1,0 +1,39 @@
+CHANGELOG.md
+  s_6f18dd121ce268::t_65baf270af978d 12-14,25-33
+env.d.ts
+  s_6f18dd121ce268::t_e547a84e9e31ae 2,9,14
+src/client.tsx
+  s_6f18dd121ce268::t_52e5579bb7042b 1175,1178,1182-1268,1276-1288,1292-1293,1298,1370
+src/fetch-tool.ts
+  s_6f18dd121ce268::t_952c66a3d5de12 27-28,102-103,105
+src/quality.ts
+  s_6f18dd121ce268::t_a87794f68fb374 76-77,113,117
+src/server.ts
+  s_6f18dd121ce268::t_6d63e84e15dcf5 24,38,99-100,103-104,108-120,127-129,134,137,141,313-388,393,431-434,438,440,451,458,463,508,719-739
+src/subagent.ts
+  s_6f18dd121ce268::t_b24ef932e8f29c 34-35,37,99,102
+src/subagents.ts
+  s_6f18dd121ce268::t_fba9376b9f71e8 166,239,242
+src/tests/worker.ts
+  s_6f18dd121ce268::t_8de067d73ff38a 31,34
+src/tests/wrangler.jsonc
+  s_6f18dd121ce268::t_5f13bdb461d02c 10-11,16-17
+wrangler.jsonc
+  s_6f18dd121ce268::t_9d8b49e63f2bd0 35-39,58-61
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "2b1056d72461687e262ae826acb08bb32381b7b7",
+  "prompts": {},
+  "sessions": {
+    "s_6f18dd121ce268": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_e73ba4895ffegcjq23ifMtMG44",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "righttu <righttu@163.com>"
+    }
+  }
+}

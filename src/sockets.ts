@@ -61,8 +61,8 @@ function send(socket: WebSocket, message: PiServerMessage): void {
 export type PiSessionSocketsHooks = {
   /** 连接时告诉前端模型能做什么（hello 消息）。 */
   capabilities?: () => { vision: boolean };
-  /** 每个新连接的请求，宿主可以从中记下站点 origin 之类的信息。 */
-  onRequest?: (request: Request) => void;
+  /** 每个新连接的请求，在发 hello 之前调用并等待；宿主可以记下 origin、重载配置。 */
+  onRequest?: (request: Request) => void | Promise<void>;
 };
 
 export class PiSessionSockets {
@@ -120,7 +120,7 @@ export class PiSessionSockets {
 
   async #onConnect(connection: Connection, ctx: ConnectionContext) {
     const session = sessionFromRequest(ctx.request, ROOT_SESSION);
-    this.#hooks.onRequest?.(ctx.request);
+    await this.#hooks.onRequest?.(ctx.request);
     send(connection, {
       type: "hello",
       session,

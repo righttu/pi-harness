@@ -1272,6 +1272,39 @@ function ConfigRow({
   );
 }
 
+/** 分享链接签名密钥：自动生成，用户只需要"全部作废"这一个操作。 */
+function ShareSecretRow() {
+  const [state, setState] = useState<"idle" | "busy" | "done">("idle");
+  const rotate = async () => {
+    if (!window.confirm("之前发出的所有分享链接都会立刻失效。继续？")) return;
+    setState("busy");
+    try {
+      await fetchJson("/api/config/share-secret", { method: "POST" });
+      setState("done");
+    } catch {
+      setState("idle");
+    }
+  };
+  return (
+    <Surface className="rounded-lg p-3 ring ring-kumo-line">
+      <div className="text-xs font-semibold">分享链接</div>
+      <p className="mt-1 text-xs leading-5 text-kumo-subtle">
+        分享链接用一个自动生成的密钥签名，不用设置。链接发错了或泄露了，点这里让之前所有链接失效（新生成的链接不受影响）。
+      </p>
+      <div className="mt-2">
+        <Button
+          variant="secondary"
+          size="sm"
+          disabled={state === "busy"}
+          onClick={() => void rotate()}
+        >
+          {state === "done" ? "已作废，旧链接失效" : "作废所有分享链接"}
+        </Button>
+      </div>
+    </Surface>
+  );
+}
+
 /** `object` 是当前打开的会话对象，保存后让它立刻重载配置。 */
 function ConfigPanel({ object }: { object: string }) {
   const [items, setItems] = useState<ConfigItem[] | null>(null);
@@ -1297,14 +1330,15 @@ function ConfigPanel({ object }: { object: string }) {
   return (
     <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
       <p className="px-1 text-[11px] leading-5 text-kumo-subtle">
-        改了立刻对当前会话生效，其他会话下次启动时生效。密钥（账号 id、AI Gateway
-        token）在 Dashboard 的 Variables and Secrets 里。
+        保存后当前会话（含它的子代理）立刻生效，其他会话打开时生效。账号 id 和 AI
+        Gateway token 在 Dashboard 的 Variables and Secrets 里。
       </p>
       {error ? <p className="px-1 text-xs text-kumo-danger">{error}</p> : null}
       {items === null && !error ? <p className="px-1 text-xs text-kumo-subtle">Loading…</p> : null}
       {items?.map((item) => (
         <ConfigRow key={item.name} item={item} onSave={save} />
       ))}
+      {items ? <ShareSecretRow /> : null}
     </div>
   );
 }

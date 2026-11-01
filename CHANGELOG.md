@@ -10,11 +10,21 @@
   代码里的类名用 `PiXxx`（JS 标识符不能带连字符）。给模型用的工具名（`read`、`subagent`…）不算组件，不加前缀。
 - **部署**：推到 `main` 由 Workers Builds 自动部署。Dashboard 里设的普通变量靠 `keep_vars: true` 保留。
 - **配置分两处**：
-  - **Dashboard 只放密钥**（Settings → Variables and Secrets）：`CF_ACCOUNT_ID`（必填）、`CF_AIG_TOKEN`（Secret，必填）、
-    `PI_SHARE_SECRET`（Secret，可选：分享链接签名密钥，不设用 CF_AIG_TOKEN；单独设则换 AIG token 时旧链接不失效）。
+  - **Dashboard 只放两样**（Settings → Variables and Secrets）：`CF_ACCOUNT_ID`（必填）、`CF_AIG_TOKEN`（Secret，必填）。
+    分享链接签名密钥自动生成、存在 `PiSettings`，Config 页可一键作废所有链接。
   - **其余 `PI_*` 在右栏 Config 页改**，存 `PiSettings` DO，没改的用默认值。定义见 `src/settings.ts` 的 `SETTINGS`。
     Dashboard 里的 `PI_*` 变量不再参与（首次启动会一次性搬进应用内设置，之后可删）。
 - **R2 桶**：`pi-files`。`shared/` 放发布的文件；`mount/` 下的对象只读挂到每个工作区的 `/workspace/r2`。
+
+---
+
+## 2026-11-01 — 换模型对所有对话生效；分享密钥自动生成
+
+- 模型 id 和路由名分开（`src/route-model.ts`）：pi 里固定两个 id，lead `dynamic/pi-route`、side `dynamic/pi-side`；发给 AI Gateway 的路由名在每次请求时按当前配置改写（`onPayload`）。改 `PI_SIDE_ROUTE` 后，所有子代理（含已存在的后台子代理）下一次请求就走新路由。以前已有子代理不跟着换，且旧路由名从 provider 删掉后会报错。
+- 子代理一律用 side id；`PI_SIDE_ROUTE` 为空时 side 走 pi-route。
+- 每个浏览器连接进来时重载配置（发 hello 之前），切到别的会话也拿到新配置；provider 只在配置变化时重建。
+- 修：`publish` 工具在会话打开时就抄走了 `PI_PUBLIC_URL`，改了不生效；现在每次调用时读。
+- 分享签名密钥：去掉 `PI_SHARE_SECRET` 变量和"回退到 CF_AIG_TOKEN"。首次使用时随机生成 32 字节存在 `PiSettings`（`__share_secret__`，不出现在 /api/config），Config 页"作废所有分享链接"即 `POST /api/config/share-secret` 换新密钥。**本次部署后，之前发出的分享链接失效**，需要重新分享。
 
 ---
 

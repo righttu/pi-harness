@@ -24,8 +24,8 @@ export type PublishResult = { key: string; url: string; size: number; expiresAt:
 export type PublishDeps = {
   workspace: Workspace;
   bucket: R2Bucket;
-  /** 签名密钥。 */
-  secret: string;
+  /** 签名密钥（存在 PiSettings，自动生成）。 */
+  secret: () => Promise<string>;
   /** 这个 DO 的名字，用作 R2 key 的目录。 */
   object: string;
   /** 链接的站点根，例如 https://pi-agent.example.com。不知道时返回相对路径。 */
@@ -85,7 +85,7 @@ export async function publishFile(
     customMetadata: { source: path, object: deps.object }
   });
   const exp = Math.floor(Date.now() / 1000) + seconds;
-  const sig = await signShare(deps.secret, key, exp);
+  const sig = await signShare(await deps.secret(), key, exp);
   const relative = `/share/${key.split("/").map(encodeURIComponent).join("/")}?exp=${exp}&sig=${sig}`;
   const origin = deps.origin();
   return { key, url: origin ? `${origin}${relative}` : relative, size: stat.size, expiresAt: exp * 1000 };

@@ -48,3 +48,17 @@ describe("PiSettings", () => {
     expect(validateSetting(text, "anything")).toBeUndefined();
   });
 });
+
+describe("share secret", () => {
+  it("is generated once, stays stable, and rotates", async () => {
+    const settings = env.PiSettings.getByName(`test-${crypto.randomUUID()}`);
+    const first = await settings.shareSecret();
+    expect(first).toMatch(/^[0-9a-f]{64}$/);
+    expect(await settings.shareSecret()).toBe(first);
+    // 不出现在设置里
+    expect(await settings.all()).toEqual({});
+    const rotated = await settings.rotateShareSecret();
+    expect(rotated).not.toBe(first);
+    expect(await settings.shareSecret()).toBe(rotated);
+  });
+});

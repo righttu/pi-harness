@@ -1,8 +1,8 @@
 // ============================================================================
 // 应用内设置。
 //
-// 两层：这里的值 > 代码默认值。Dashboard 变量不再参与这些项（只留密钥和
-// 账号 id：CF_ACCOUNT_ID、CF_AIG_TOKEN、PI_SHARE_SECRET）。
+// 两层：这里的值 > 代码默认值。Dashboard 只留账号 id 和 AI Gateway token
+// （CF_ACCOUNT_ID、CF_AIG_TOKEN）。分享链接的签名密钥也存在这里，自动生成。
 //
 // SETTINGS 是唯一的定义表：server.ts 用它合并配置，Config 页用它画表单。
 // 加一个设置项只改这里。
@@ -74,7 +74,7 @@ export const SETTINGS: readonly SettingDef[] = [
     placeholder: "pi-side",
     defaultValue: "",
     description:
-      "子代理（subagent / subagents / review）走的 AI Gateway 动态路由名。空 = 和主 Agent 同一条路由。改后新建的子代理生效。"
+      "子代理（subagent / subagents / review）走的 AI Gateway 动态路由名。空 = 和主 Agent 同一条路由（pi-route）。改后所有子代理（包括已有的）下一次请求就用新路由。"
   },
   {
     name: "PI_PRICE_INPUT",
@@ -188,6 +188,30 @@ export class PiSettings extends DurableObject<Env> {
       out[row.key] = row.value;
     }
     return out;
+  }
+
+  /**
+   * 分享链接的签名密钥。第一次用时随机生成并存下来，用户不用设。不放进
+   * all()（以 __ 开头），不会出现在 /api/config 里。
+   */
+  shareSecret(): string {
+    const row = this.ctx.storage.sql
+      .exec<{ value: string }>("SELECT value FROM settings WHERE key = '__share_secret__'")
+      .toArray()[0];
+    return row?.value ?? this.rotateShareSecret();
+  }
+
+  /** 换一个新密钥：之前发出的所有分享链接立刻失效。 */
+  rotateShareSecret(): string {
+    const bytes = crypto.getRandomValues(new Uint8Array(32));
+    const secret = [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+    this.ctx.storage.sql.exec(
+      `INSERT INTO settings (key, value, updated_at) VALUES ('__share_secret__', ?1, ?2)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      secret,
+      Date.now()
+    );
+    return secret;
   }
 
   /** 设一个值；`null`、空或等于默认值表示清掉（回到默认）。校验失败抛错。 */

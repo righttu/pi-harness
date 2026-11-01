@@ -6,6 +6,7 @@ import { createGitModule } from "@cloudflare/computer/modules/git";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createProvider, type Model } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
+import { routeStreams } from "./route-model";
 import { createModels } from "@earendil-works/pi-ai/models";
 import {
   createRegistry,
@@ -46,7 +47,16 @@ export { PiSessionIndex, PiSettings };
 
 // AI Gateway 的名字和动态路由的名字。换模型只改路由配置，不改这里。
 const GATEWAY_ID = "pi-gateway";
+/**
+ * pi 里的两个模型 id。只是标签，固定不变（对话配置里存的就是它们）；实际发给
+ * AI Gateway 的路由名每次请求时按配置决定，见 src/route-model.ts。
+ *   lead：主 Agent，路由 pi-route。
+ *   side：子代理，路由 PI_SIDE_ROUTE，没设就也走 pi-route。
+ * side 的 id 沿用以前的 "dynamic/pi-side"，已有子代理的对话不用迁移。
+ */
 const MODEL_ID = "dynamic/pi-route";
+const SIDE_MODEL_ID = "dynamic/pi-side";
+const LEAD_ROUTE = "pi-route";
 const PROVIDER_ID = "aigw";
 /**
  * 路由背后模型的上下文窗口默认值（变量 PI_CONTEXT_WINDOW 覆盖）。这是
@@ -58,11 +68,10 @@ const CONTEXT_WINDOW = 128_000;
 const R2_MOUNT_MAX_BYTES = 64 * 1024 * 1024;
 
 /**
- * Dashboard 里只设这三样（Settings → Variables and Secrets）：
+ * Dashboard 里只设这两样（Settings → Variables and Secrets）：
  *   CF_ACCOUNT_ID    账号 id（Text）。必填。
  *   CF_AIG_TOKEN     AI Gateway token（Secret）。必填。
- *   PI_SHARE_SECRET  可选（Secret）。分享链接的签名密钥；不设用 CF_AIG_TOKEN。
- *                    单独设的好处：换 AIG token 时旧分享链接不失效。
+ * 分享链接的签名密钥自动生成，存在 PiSettings 里（Config 页可以一键作废）。
  *
  * 其余 PI_* 配置在右栏 Config 页改，定义和默认值见 src/settings.ts 的 SETTINGS。
  * 合并后的生效配置是 GatewayEnv（PiAgent.#config）。
@@ -70,7 +79,6 @@ const R2_MOUNT_MAX_BYTES = 64 * 1024 * 1024;
 type GatewayEnv = {
   CF_ACCOUNT_ID: string;
   CF_AIG_TOKEN: string;
-  PI_SHARE_SECRET?: string;
   PI_MODEL_INPUT?: string;
   PI_CONTEXT_WINDOW?: string;
   PI_MAX_TOKENS?: string;
@@ -84,11 +92,10 @@ type GatewayEnv = {
 
 /** 密钥 + 应用内设置（含默认值）→ 生效配置。Dashboard 里的 PI_* 变量不参与。 */
 export function resolveConfig(env: Env, saved: SettingsMap): GatewayEnv {
-  const infra = env as unknown as Pick<GatewayEnv, "CF_ACCOUNT_ID" | "CF_AIG_TOKEN" | "PI_SHARE_SECRET">;
+  const infra = env as unknown as Pick<GatewayEnv, "CF_ACCOUNT_ID" | "CF_AIG_TOKEN">;
   return {
     CF_ACCOUNT_ID: infra.CF_ACCOUNT_ID,
     CF_AIG_TOKEN: infra.CF_AIG_TOKEN,
-    ...(infra.PI_SHARE_SECRET ? { PI_SHARE_SECRET: infra.PI_SHARE_SECRET } : {}),
     ...effectiveSettings(saved)
   } as GatewayEnv;
 }
@@ -123,11 +130,6 @@ function modelProfile(env: GatewayEnv) {
     maxTokens: Number(env.PI_MAX_TOKENS) || 8192,
     reasoning: env.PI_MODEL_REASONING === "true"
   };
-}
-
-/** 分享链接签名密钥。 */
-function shareSecret(env: GatewayEnv): string {
-  return env.PI_SHARE_SECRET || env.CF_AIG_TOKEN;
 }
 
 /** 一个会话（pi session）的状态，GET /api/session/<id>/state 返回。 */
@@ -266,11 +268,14 @@ export class PiAgent extends DurableObject<Env> {
   /** 工作区工具，harness 工厂里赋值；plan mode 切换时要用。 */
   workspaceTools: ToolRegistration[] = [];
   /**
-   * 当前生效的配置 = Dashboard 变量 + 应用内设置（PiSettings）。harness 打开时
-   * 载入；Config 页改了之后 Worker 调 refreshConfig() 更新。读配置的地方一律
-   * 通过 this.#config，不直接读 this.env，这样改动才能生效。
+   * 当前生效的配置 = Dashboard 的两个密钥 + 应用内设置（PiSettings）。三个时机
+   * 重新载入：harness 打开时；每个浏览器连接进来时（切到别的会话也就拿到了新
+   * 配置）；Config 页保存时（当前会话）。读配置的地方一律通过 this.#config，
+   * 不直接读 this.env，也不在打开时把值抄走，这样改动才能生效。
    */
   #config: GatewayEnv = resolveConfig(this.env, {});
+  /** 上次注册 provider 用的配置，没变就不重建。 */
+  #appliedKey = "";
   /** pi 的模型目录。换配置时重新 setProvider，同一个对象，pi 每次请求都从这里读。 */
   readonly models = createModels();
 
@@ -284,7 +289,10 @@ export class PiAgent extends DurableObject<Env> {
    * PI_SIDE_ROUTE 时的 sidekick 路由。模型能力、价格都从配置来。
    */
   #applyModels(): void {
-    const { CF_ACCOUNT_ID, CF_AIG_TOKEN, PI_SIDE_ROUTE, PI_PRICE_INPUT, PI_PRICE_OUTPUT } = this.#config;
+    const key = JSON.stringify(this.#config);
+    if (key === this.#appliedKey) return;
+    this.#appliedKey = key;
+    const { CF_ACCOUNT_ID, CF_AIG_TOKEN, PI_PRICE_INPUT, PI_PRICE_OUTPUT } = this.#config;
     const profile = modelProfile(this.#config);
     const baseUrl = `https://gateway.ai.cloudflare.com/v1/${CF_ACCOUNT_ID}/${GATEWAY_ID}/compat`;
     // pi 按 cost 字段算每轮花费；单位是美元 / 百万 token。
@@ -310,9 +318,7 @@ export class PiAgent extends DurableObject<Env> {
       compat: { supportsDeveloperRole: false, supportsReasoningEffort: false }
     });
     const lead = routeModel(MODEL_ID, "AI Gateway dynamic route (lead)");
-    const side = PI_SIDE_ROUTE
-      ? routeModel(`dynamic/${PI_SIDE_ROUTE}`, "AI Gateway dynamic route (sidekick)")
-      : undefined;
+    const side = routeModel(SIDE_MODEL_ID, "AI Gateway dynamic route (sidekick)");
     this.models.setProvider(
       createProvider({
         id: PROVIDER_ID,
@@ -324,17 +330,22 @@ export class PiAgent extends DurableObject<Env> {
             resolve: async () => ({ auth: { apiKey: CF_AIG_TOKEN } })
           }
         },
-        models: side ? [lead, side] : [lead],
-        api: openAICompletionsApi()
+        models: [lead, side],
+        // 请求时才决定路由名：side 读当时的 PI_SIDE_ROUTE。
+        api: routeStreams(openAICompletionsApi(), (model) =>
+          model.id === SIDE_MODEL_ID
+            ? `dynamic/${this.#config.PI_SIDE_ROUTE?.replace(/^dynamic\//, "") || LEAD_ROUTE}`
+            : `dynamic/${LEAD_ROUTE}`
+        )
       })
     );
   }
 
-  /** 子代理走的模型；没设 PI_SIDE_ROUTE 就继承父对话。每次创建子对话时读。 */
-  #childModel = () =>
-    this.#config.PI_SIDE_ROUTE
-      ? { provider: PROVIDER_ID, modelId: `dynamic/${this.#config.PI_SIDE_ROUTE}` }
-      : undefined;
+  /**
+   * 子代理一律用 side 这个 id。路由名在请求时才定（见 #applyModels），所以以后
+   * 改 PI_SIDE_ROUTE，已有子代理也跟着换。
+   */
+  #childModel = () => ({ provider: PROVIDER_ID, modelId: SIDE_MODEL_ID });
 
   /** Config 页改了设置后由 Worker 调用：重新载入并应用。 */
   async refreshConfig(): Promise<void> {
@@ -345,13 +356,13 @@ export class PiAgent extends DurableObject<Env> {
   #origin: string | undefined;
   /** publish 工具和 Files 面板"分享"共用。 */
   get publishDeps(): PublishDeps {
-    const env = this.#config;
     return {
       workspace: this.workspace,
       bucket: this.env.PI_FILES,
-      secret: shareSecret(env),
+      secret: () => this.env.PiSettings.getByName(SETTINGS_NAME).shareSecret(),
       object: this.ctx.id.name ?? this.ctx.id.toString(),
-      origin: () => env.PI_PUBLIC_URL?.replace(/\/$/, "") || this.#origin,
+      // 每次调用时读配置：publish 工具在 harness 打开时就拿到了这份 deps。
+      origin: () => this.#config.PI_PUBLIC_URL?.replace(/\/$/, "") || this.#origin,
       contentTypeOf
     };
   }
@@ -383,14 +394,14 @@ export class PiAgent extends DurableObject<Env> {
       // 不走 Workers AI binding，而是用 OpenAI 兼容协议直接打 AI Gateway 的
       // /compat 入口（和 Brain 一样）。这个入口支持 Workers AI、内置供应商和
       // custom provider，所以路由节点换什么模型这里都不用改。
-      // 配置 = Dashboard 变量 + 应用内设置；模型 provider 按配置注册，之后
+      // 配置 = 密钥 + 应用内设置；模型 provider 按配置注册，之后
       // refreshConfig() 可以重建。
       await this.#loadConfig();
       this.#applyModels();
       // ======================================================================
       // lead / sidekick 分层：设了 PI_SIDE_ROUTE，子代理就走那条路由（通常是
       // 更便宜、更快或更擅长写代码的模型）；主 Agent 仍用 pi-route。
-      // childModel 是 getter，改设置后新建的子对话立刻用新路由。
+      // 子代理的模型 id 固定为 side，路由名每次请求时读配置。
       // ======================================================================
       const childModel = this.#childModel;
       const subagent = createSubagent({ childModel });
@@ -461,8 +472,11 @@ export class PiAgent extends DurableObject<Env> {
     (tag) => this.ctx.getWebSockets(tag),
     {
       capabilities: () => ({ vision: modelProfile(this.#config).vision }),
-      onRequest: (request) => {
+      // 每个浏览器连接进来时重载配置，在发 hello（含 vision）之前。
+      onRequest: async (request) => {
         this.#origin = new URL(request.url).origin;
+        // 读不到设置不该挡住连接：沿用上一次的配置。
+        await this.refreshConfig().catch((error) => console.warn("refreshConfig", error));
       }
     }
   );
@@ -654,7 +668,7 @@ async function handleApi(
       .join("/");
     const exp = Number(url.searchParams.get("exp"));
     const sig = url.searchParams.get("sig") ?? "";
-    const secret = shareSecret(resolveConfig(env, {}));
+    const secret = await env.PiSettings.getByName(SETTINGS_NAME).shareSecret();
     if (!key.startsWith("shared/") || !(await verifyShare(secret, key, exp, sig))) {
       return bad("Link is invalid or has expired", 403);
     }
@@ -679,7 +693,7 @@ async function handleApi(
       const body = (await request.json().catch(() => ({}))) as {
         key?: string;
         value?: string | null;
-        /** 当前打开的会话对象，改完让它立刻重载配置；其他对象重启后生效。 */
+        /** 当前打开的会话对象，改完让它立刻重载配置；其他会话下次连接时重载。 */
         object?: string;
       };
       if (!body.key || !SETTABLE.has(body.key)) return bad("Unknown setting");
@@ -690,6 +704,11 @@ async function handleApi(
       return Response.json(describeConfig(saved));
     }
     return bad("Method not allowed", 405);
+  }
+  // 换分享签名密钥：之前发出的所有分享链接立刻失效。
+  if (url.pathname === "/api/config/share-secret" && method === "POST") {
+    await env.PiSettings.getByName(SETTINGS_NAME).rotateShareSecret();
+    return Response.json({ ok: true });
   }
 
   if (url.pathname === "/api/sessions") {

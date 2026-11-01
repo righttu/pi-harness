@@ -21,6 +21,7 @@ import { WebSockets } from "agents/websockets";
 import { createFetchTool, parseAllowList } from "./fetch-tool";
 import { createPublish, publishFile, verifyShare, type PublishDeps } from "./publish";
 import { PiSessionIndex, splitSessionId } from "./sessions";
+import { PiSettings, SETTABLE, SETTINGS_NAME } from "./settings";
 import { PiSessionSockets } from "./sockets";
 import {
   createReview,
@@ -34,7 +35,7 @@ import { createSubagent } from "./subagent";
 import { createSubagents } from "./subagents";
 import { createWorkspaceTools, JAVASCRIPT_BACKEND } from "./workspace";
 
-export { PiSessionIndex };
+export { PiSessionIndex, PiSettings };
 
 // AI Gateway 的名字和动态路由的名字。换模型只改路由配置，不改这里。
 const GATEWAY_ID = "pi-gateway";
@@ -95,32 +96,49 @@ export type ConfigItem = {
   name: string;
   /** 当前生效的值（Secret 只显示是否已设）。 */
   value: string;
-  /** 来自 Dashboard 变量，还是用的默认值。 */
-  source: "variable" | "default";
+  /** 来自应用内设置、Dashboard 变量，还是默认值。 */
+  source: "app" | "variable" | "default";
   defaultValue: string;
   secret?: boolean;
+  /** 能不能在应用内改（密钥和账号 id 不能）。 */
+  settable: boolean;
   description: string;
 };
 
-export function describeConfig(env: GatewayEnv): ConfigItem[] {
+/**
+ * 把 Dashboard 变量和应用内设置合并成一份生效配置。应用内设置优先。
+ * 只有 SETTABLE 里的 key 会被应用内设置覆盖。
+ */
+export function resolveConfig(env: GatewayEnv, overrides: Record<string, string>): GatewayEnv {
+  const merged: Record<string, string | undefined> = { ...env };
+  for (const [key, value] of Object.entries(overrides)) {
+    if (SETTABLE.has(key) && value !== "") merged[key] = value;
+  }
+  return merged as unknown as GatewayEnv;
+}
+
+export function describeConfig(env: GatewayEnv, overrides: Record<string, string>): ConfigItem[] {
   const item = (
     name: keyof GatewayEnv,
     defaultValue: string,
     description: string,
     options: { secret?: boolean } = {}
   ): ConfigItem => {
-    const raw = env[name];
+    const settable = SETTABLE.has(name);
+    const fromApp = settable ? overrides[name] : undefined;
+    const raw = fromApp !== undefined && fromApp !== "" ? fromApp : env[name];
     const set = raw !== undefined && raw !== "";
     return {
       name,
       value: options.secret ? (set ? "（已设置）" : "（未设置）") : set ? String(raw) : defaultValue,
-      source: set ? "variable" : "default",
+      source: fromApp !== undefined && fromApp !== "" ? "app" : set ? "variable" : "default",
       defaultValue: options.secret ? "" : defaultValue,
       ...(options.secret ? { secret: true } : {}),
+      settable,
       description
     };
   };
-  const profile = modelProfile(env);
+  const profile = modelProfile(resolveConfig(env, overrides));
   return [
     item("CF_ACCOUNT_ID", "", "Cloudflare 账号 id。必填。"),
     item("CF_AIG_TOKEN", "", "AI Gateway token。必填。", { secret: true }),
@@ -292,11 +310,87 @@ export class PiAgent extends DurableObject<Env> {
   readonly registry = createRegistry();
   /** 工作区工具，harness 工厂里赋值；plan mode 切换时要用。 */
   workspaceTools: ToolRegistration[] = [];
+  /**
+   * 当前生效的配置 = Dashboard 变量 + 应用内设置（PiSettings）。harness 打开时
+   * 载入；Config 页改了之后 Worker 调 refreshConfig() 更新。读配置的地方一律
+   * 通过 this.#config，不直接读 this.env，这样改动才能生效。
+   */
+  #config: GatewayEnv = this.env as unknown as GatewayEnv;
+  /** pi 的模型目录。换配置时重新 setProvider，同一个对象，pi 每次请求都从这里读。 */
+  readonly models = createModels();
+
+  async #loadConfig(): Promise<void> {
+    const overrides = await this.env.PiSettings.getByName(SETTINGS_NAME).all();
+    this.#config = resolveConfig(this.env as unknown as GatewayEnv, overrides);
+  }
+
+  /**
+   * 按当前配置（重新）注册 AI Gateway provider：lead 路由，以及设了
+   * PI_SIDE_ROUTE 时的 sidekick 路由。模型能力、价格都从配置来。
+   */
+  #applyModels(): void {
+    const { CF_ACCOUNT_ID, CF_AIG_TOKEN, PI_SIDE_ROUTE, PI_PRICE_INPUT, PI_PRICE_OUTPUT } = this.#config;
+    const profile = modelProfile(this.#config);
+    const baseUrl = `https://gateway.ai.cloudflare.com/v1/${CF_ACCOUNT_ID}/${GATEWAY_ID}/compat`;
+    // pi 按 cost 字段算每轮花费；单位是美元 / 百万 token。
+    const price = {
+      input: Number(PI_PRICE_INPUT ?? 0) || 0,
+      output: Number(PI_PRICE_OUTPUT ?? 0) || 0,
+      cacheRead: 0,
+      cacheWrite: 0
+    };
+    // 每条动态路由在这里是一个"模型"；同一个 provider、同一个入口，只有 id 不同。
+    const routeModel = (id: string, name: string): Model<"openai-completions"> => ({
+      id,
+      name,
+      api: "openai-completions",
+      provider: PROVIDER_ID,
+      baseUrl,
+      reasoning: profile.reasoning,
+      input: [...profile.input],
+      cost: price,
+      contextWindow: profile.contextWindow,
+      maxTokens: profile.maxTokens,
+      headers: { "cf-aig-authorization": `Bearer ${CF_AIG_TOKEN}` },
+      compat: { supportsDeveloperRole: false, supportsReasoningEffort: false }
+    });
+    const lead = routeModel(MODEL_ID, "AI Gateway dynamic route (lead)");
+    const side = PI_SIDE_ROUTE
+      ? routeModel(`dynamic/${PI_SIDE_ROUTE}`, "AI Gateway dynamic route (sidekick)")
+      : undefined;
+    this.models.setProvider(
+      createProvider({
+        id: PROVIDER_ID,
+        name: "Cloudflare AI Gateway",
+        baseUrl,
+        auth: {
+          apiKey: {
+            name: "AI Gateway token",
+            resolve: async () => ({ auth: { apiKey: CF_AIG_TOKEN } })
+          }
+        },
+        models: side ? [lead, side] : [lead],
+        api: openAICompletionsApi()
+      })
+    );
+  }
+
+  /** 子代理走的模型；没设 PI_SIDE_ROUTE 就继承父对话。每次创建子对话时读。 */
+  #childModel = () =>
+    this.#config.PI_SIDE_ROUTE
+      ? { provider: PROVIDER_ID, modelId: `dynamic/${this.#config.PI_SIDE_ROUTE}` }
+      : undefined;
+
+  /** Config 页改了设置后由 Worker 调用：重新载入并应用。 */
+  async refreshConfig(): Promise<void> {
+    await this.#loadConfig();
+    this.#applyModels();
+  }
   /** 最近一次请求的站点根，publish 生成链接用（PI_PUBLIC_URL 优先）。 */
   #origin: string | undefined;
   /** publish 工具和 Files 面板"分享"共用。 */
   get publishDeps(): PublishDeps {
-    const env = this.env as unknown as GatewayEnv;
+    const env = this.#config;
     return {
       workspace: this.workspace,
       bucket: this.env.PI_FILES,
@@ -334,41 +428,16 @@ export class PiAgent extends DurableObject<Env> {
       // 不走 Workers AI binding，而是用 OpenAI 兼容协议直接打 AI Gateway 的
       // /compat 入口（和 Brain 一样）。这个入口支持 Workers AI、内置供应商和
       // custom provider，所以路由节点换什么模型这里都不用改。
-      const gatewayEnv = this.env as unknown as GatewayEnv;
-      const { CF_ACCOUNT_ID, CF_AIG_TOKEN, PI_SIDE_ROUTE, PI_PRICE_INPUT, PI_PRICE_OUTPUT } = gatewayEnv;
-      const profile = modelProfile(gatewayEnv);
-      // pi 按 cost 字段算每轮花费；单位是美元 / 百万 token。
-      const price = {
-        input: Number(PI_PRICE_INPUT ?? 0) || 0,
-        output: Number(PI_PRICE_OUTPUT ?? 0) || 0,
-        cacheRead: 0,
-        cacheWrite: 0
-      };
-      const baseUrl = `https://gateway.ai.cloudflare.com/v1/${CF_ACCOUNT_ID}/${GATEWAY_ID}/compat`;
-      // 每条动态路由在这里是一个"模型"；同一个 provider、同一个入口，只有 id 不同。
-      const routeModel = (id: string, name: string): Model<"openai-completions"> => ({
-        id,
-        name,
-        api: "openai-completions",
-        provider: PROVIDER_ID,
-        baseUrl,
-        reasoning: profile.reasoning,
-        input: [...profile.input],
-        cost: price,
-        contextWindow: profile.contextWindow,
-        maxTokens: profile.maxTokens,
-        headers: { "cf-aig-authorization": `Bearer ${CF_AIG_TOKEN}` },
-        compat: { supportsDeveloperRole: false, supportsReasoningEffort: false }
-      });
-      const lead = routeModel(MODEL_ID, "AI Gateway dynamic route (lead)");
+      // 配置 = Dashboard 变量 + 应用内设置；模型 provider 按配置注册，之后
+      // refreshConfig() 可以重建。
+      await this.#loadConfig();
+      this.#applyModels();
       // ======================================================================
       // lead / sidekick 分层：设了 PI_SIDE_ROUTE，子代理就走那条路由（通常是
       // 更便宜、更快或更擅长写代码的模型）；主 Agent 仍用 pi-route。
+      // childModel 是 getter，改设置后新建的子对话立刻用新路由。
       // ======================================================================
-      const side = PI_SIDE_ROUTE
-        ? routeModel(`dynamic/${PI_SIDE_ROUTE}`, "AI Gateway dynamic route (sidekick)")
-        : undefined;
-      const childModel = side ? { provider: PROVIDER_ID, modelId: side.id } : undefined;
+      const childModel = this.#childModel;
       const subagent = createSubagent({ childModel });
       const subagents = createSubagents({ childModel });
       const review = createReview({
@@ -379,33 +448,19 @@ export class PiAgent extends DurableObject<Env> {
       const publish = createPublish(this.publishDeps);
       const web = createFetchTool({
         workspace: this.workspace,
-        allow: parseAllowList(gatewayEnv.PI_FETCH_ALLOW),
+        allow: () => parseAllowList(this.#config.PI_FETCH_ALLOW),
         normalizePath: normalizeWorkspacePath
       });
       for (const extension of [subagent, subagents, review, publish, web, ReviewerRole, Plan]) {
         this.registry.install(extension);
       }
       // ======================================================================
-      // 默认只选这四个扩展。ReviewerRole 只装在 reviewer 子对话上，Plan 只在
+      // 默认只选这几个扩展。ReviewerRole 只装在 reviewer 子对话上，Plan 只在
       // 用户打开 plan mode 时加到主对话上（见 setPlanMode）。不写这一条，
       // "默认"就是全部已安装扩展，Plan 的系统提示会一直生效。
       // ======================================================================
       const defaultExtensions = [playground, subagent, subagents, review, publish, web];
-      const gateway = createProvider({
-        id: PROVIDER_ID,
-        name: "Cloudflare AI Gateway",
-        baseUrl,
-        auth: {
-          apiKey: {
-            name: "AI Gateway token",
-            resolve: async () => ({ auth: { apiKey: CF_AIG_TOKEN } })
-          }
-        },
-        models: side ? [lead, side] : [lead],
-        api: openAICompletionsApi()
-      });
-      const models = createModels();
-      models.setProvider(gateway);
+      const models = this.models;
       return Harness.open(
         storage,
         {
@@ -450,7 +505,7 @@ export class PiAgent extends DurableObject<Env> {
     this.registry,
     (tag) => this.ctx.getWebSockets(tag),
     {
-      capabilities: () => ({ vision: modelProfile(this.env as unknown as GatewayEnv).vision }),
+      capabilities: () => ({ vision: modelProfile(this.#config).vision }),
       onRequest: (request) => {
         this.#origin = new URL(request.url).origin;
       }
@@ -661,9 +716,27 @@ async function handleApi(
     return new Response(object.body, { headers });
   }
 
-  // 当前生效的配置和每个变量的说明（右栏 Config 标签页）。
-  if (url.pathname === "/api/config" && method === "GET") {
-    return Response.json(describeConfig(env as unknown as GatewayEnv));
+  // 当前生效的配置和每个变量的说明（右栏 Config 标签页）；PATCH 改应用内设置。
+  if (url.pathname === "/api/config") {
+    const settings = env.PiSettings.getByName(SETTINGS_NAME);
+    if (method === "GET") {
+      return Response.json(describeConfig(env as unknown as GatewayEnv, await settings.all()));
+    }
+    if (method === "PATCH") {
+      const body = (await request.json().catch(() => ({}))) as {
+        key?: string;
+        value?: string | null;
+        /** 当前打开的会话对象，改完让它立刻重载配置；其他对象重启后生效。 */
+        object?: string;
+      };
+      if (!body.key || !SETTABLE.has(body.key)) return bad("Unknown or protected setting");
+      const overrides = await settings.set(body.key, body.value ?? null);
+      if (body.object && UUID.test(body.object)) {
+        await env.PiAgent.getByName(body.object).refreshConfig();
+      }
+      return Response.json(describeConfig(env as unknown as GatewayEnv, overrides));
+    }
+    return bad("Method not allowed", 405);
   }
 
   if (url.pathname === "/api/sessions") {

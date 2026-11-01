@@ -1172,13 +1172,100 @@ function FilesPanel({ session, refreshKey }: { session: string; refreshKey: numb
 type ConfigItem = {
   name: string;
   value: string;
-  source: "variable" | "default";
+  source: "app" | "variable" | "default";
   defaultValue: string;
   secret?: boolean;
+  settable: boolean;
   description: string;
 };
 
-function ConfigPanel() {
+const SOURCE_LABEL: Record<ConfigItem["source"], string> = {
+  app: "应用内",
+  variable: "Dashboard",
+  default: "默认"
+};
+
+/** 一行可编辑的设置。 */
+function ConfigRow({
+  item,
+  onSave
+}: {
+  item: ConfigItem;
+  onSave: (key: string, value: string | null) => Promise<void>;
+}) {
+  const [draft, setDraft] = useState(item.source === "app" ? item.value : "");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    setDraft(item.source === "app" ? item.value : "");
+  }, [item.value, item.source]);
+  const save = async (value: string | null) => {
+    setBusy(true);
+    try {
+      await onSave(item.name, value);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Surface className="rounded-lg p-3 ring ring-kumo-line">
+      <div className="flex items-center gap-2">
+        <code className="min-w-0 flex-1 truncate text-xs font-semibold">{item.name}</code>
+        <Badge variant={item.source === "default" ? "secondary" : "success"}>
+          {SOURCE_LABEL[item.source]}
+        </Badge>
+      </div>
+      <p className="mt-1 text-xs leading-5 text-kumo-subtle">{item.description}</p>
+      {item.settable ? (
+        <div className="mt-2 flex items-center gap-1.5">
+          <input
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") void save(draft);
+            }}
+            placeholder={item.value || item.defaultValue || "—"}
+            disabled={busy}
+            className="min-w-0 flex-1 rounded border border-kumo-line bg-kumo-base px-2 py-1 font-mono text-[11px] outline-none focus:border-kumo-ring"
+          />
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={busy || draft.trim() === "" || draft === (item.source === "app" ? item.value : "")}
+            onClick={() => void save(draft)}
+          >
+            Save
+          </Button>
+          {item.source === "app" ? (
+            <Button
+              variant="ghost"
+              shape="square"
+              size="sm"
+              aria-label="Reset to variable/default"
+              title="清掉应用内的值，回到 Dashboard 变量或默认值"
+              disabled={busy}
+              onClick={() => void save(null)}
+              icon={<XIcon size={12} />}
+            />
+          ) : null}
+        </div>
+      ) : (
+        <div className="mt-1 break-all font-mono text-[11px] text-kumo-default">
+          {item.value || "—"}
+          <span className="ml-2 text-kumo-inactive">（只能在 Dashboard 设）</span>
+        </div>
+      )}
+      {item.settable && item.source !== "app" ? (
+        <p className="mt-1 text-[10px] text-kumo-inactive">
+          当前生效：<span className="font-mono">{item.value || "—"}</span>
+          {item.source === "variable" && item.defaultValue ? `（默认 ${item.defaultValue}）` : ""}
+        </p>
+      ) : null}
+    </Surface>
+  );
+}
+
+/** `object` 是当前打开的会话对象，保存后让它立刻重载配置。 */
+function ConfigPanel({ object }: { object: string }) {
   const [items, setItems] = useState<ConfigItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
@@ -1186,30 +1273,29 @@ function ConfigPanel() {
       .then(setItems)
       .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
   }, []);
+  const save = async (key: string, value: string | null) => {
+    try {
+      setItems(
+        await fetchJson<ConfigItem[]>("/api/config", {
+          method: "PATCH",
+          body: JSON.stringify({ key, value, object })
+        })
+      );
+      setError(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
   return (
     <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
       <p className="px-1 text-[11px] leading-5 text-kumo-subtle">
-        这些是 Worker 变量（Dashboard → pi-harness → Settings → Variables and Secrets）。
-        灰色的是没设、用默认值；换模型时按这里的名字加。
+        在这里改的值立刻对当前会话生效（其他会话下次启动时生效），优先于 Dashboard 变量。
+        清掉就回到 Dashboard 变量或默认值。密钥只能在 Dashboard 设。
       </p>
       {error ? <p className="px-1 text-xs text-kumo-danger">{error}</p> : null}
       {items === null && !error ? <p className="px-1 text-xs text-kumo-subtle">Loading…</p> : null}
       {items?.map((item) => (
-        <Surface key={item.name} className="rounded-lg p-3 ring ring-kumo-line">
-          <div className="flex items-center gap-2">
-            <code className="min-w-0 flex-1 truncate text-xs font-semibold">{item.name}</code>
-            <Badge variant={item.source === "variable" ? "success" : "secondary"}>
-              {item.source === "variable" ? "已设" : "默认"}
-            </Badge>
-          </div>
-          <div className="mt-1 break-all font-mono text-[11px] text-kumo-default">
-            {item.value || "—"}
-            {item.source === "variable" && item.defaultValue && !item.secret ? (
-              <span className="ml-2 text-kumo-inactive">(默认 {item.defaultValue})</span>
-            ) : null}
-          </div>
-          <p className="mt-1 text-xs leading-5 text-kumo-subtle">{item.description}</p>
-        </Surface>
+        <ConfigRow key={item.name} item={item} onSave={save} />
       ))}
     </div>
   );
@@ -1281,7 +1367,7 @@ function Sidebar({
       ) : tab === "tools" ? (
         <ToolsPanel tools={tools} activeTools={activeTools} />
       ) : (
-        <ConfigPanel />
+        <ConfigPanel object={session} />
       )}
     </aside>
   );

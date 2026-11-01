@@ -31,10 +31,10 @@ import {
 /** 子对话的配置项。 */
 export type SubagentOptions = {
   /**
-   * 子对话用的模型（lead / sidekick 分层）。不传就继承父对话的模型。
-   * server.ts 从 Worker 变量 PI_SIDE_ROUTE 决定。
+   * 子对话用的模型（lead / sidekick 分层）。不传或返回 undefined 就继承父对话
+   * 的模型。是 getter：server.ts 按当前配置的 PI_SIDE_ROUTE 实时决定。
    */
-  childModel?: ModelRef;
+  childModel?: () => ModelRef | undefined;
 };
 
 /** 记录的子对话步骤上限，防止一个跑很久的子对话把 details 撑大。 */
@@ -96,9 +96,10 @@ export function createSubagent(options: SubagentOptions = {}): Extension {
             ownership: { kind: "task", taskId: api.taskId }
           });
           // 子对话里不再提供 subagent 工具，避免递归委派；模型按配置分层。
+          const model = options.childModel?.();
           await configure(tx, created.id, {
             extensions: { remove: [Subagent] },
-            ...(options.childModel ? { model: options.childModel } : {})
+            ...(model ? { model } : {})
           });
           return created.id;
         }, context);

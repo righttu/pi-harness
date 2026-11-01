@@ -9,7 +9,9 @@
 - **命名**：所有组件以 `pi` 开头。Cloudflare 资源名（Worker、网关、路由、变量）用小写 `pi-xxx`；
   代码里的类名用 `PiXxx`（JS 标识符不能带连字符）。给模型用的工具名（`read`、`subagent`…）不算组件，不加前缀。
 - **部署**：推到 `main` 由 Workers Builds 自动部署。Dashboard 里设的普通变量靠 `keep_vars: true` 保留。
-- **Worker 变量**（都在 `src/server.ts` 顶部 `GatewayEnv` 注释里）：
+- **配置**：右栏 **Config** 页可直接改 `PI_*` 非密钥项，存在 `PiSettings` DO 里，优先于 Dashboard 变量。
+  密钥（`CF_AIG_TOKEN`、`PI_SHARE_SECRET`）和 `CF_ACCOUNT_ID` 只能在 Dashboard 设。
+- **Worker 变量**（都在 `src/server.ts` 顶部 `GatewayEnv` 注释里，Config 页也列着）：
   - 必填：`CF_ACCOUNT_ID`（Text）、`CF_AIG_TOKEN`（Secret）
   - 模型能力：`PI_MODEL_INPUT`（`text` 或 `text,image`，默认 text）、`PI_CONTEXT_WINDOW`（默认 128000）、
     `PI_MAX_TOKENS`（默认 8192）、`PI_MODEL_REASONING`（`true`/`false`）
@@ -17,6 +19,15 @@
     `PI_PUBLIC_URL`（站点根，分享链接用）、`PI_SHARE_SECRET`（Secret，分享链接签名；不设用 CF_AIG_TOKEN）、
     `PI_FETCH_ALLOW`（fetch 工具域名白名单，逗号分隔，默认 `*`）
 - **R2 桶**：`pi-files`。`shared/` 放发布的文件；`mount/` 下的对象只读挂到每个工作区的 `/workspace/r2`。
+
+---
+
+## 2026-10-31 — Config 页可编辑（应用内设置）
+
+- 新 DO `PiSettings`（全局单例，迁移 v4）：key/value 存应用内改的 `PI_*` 配置。
+- 优先级：应用内设置 > Dashboard 变量 > 默认值。Config 页每行可改、可清（清掉回退）。密钥和账号 id 仍只能在 Dashboard 设。
+- `PATCH /api/config { key, value, object }`：保存后让当前会话对象 `refreshConfig()` 立刻重建模型 provider；其他对象下次启动时生效。
+- 配置读取全部改为经过 `PiAgent.#config`：模型能力、价格、sidekick 路由（子代理创建时实时读）、fetch 白名单（每次调用实时读）、publish 的站点根。
 
 ---
 

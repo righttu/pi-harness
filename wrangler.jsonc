@@ -32,6 +32,11 @@
         // 会话目录（每个用户一个实例），见 src/sessions.ts
         "name": "PiSessionIndex",
         "class_name": "PiSessionIndex"
+      },
+      {
+        // 应用内设置（全局单例），见 src/settings.ts
+        "name": "PiSettings",
+        "class_name": "PiSettings"
       }
     ]
   },
@@ -50,6 +55,10 @@
     {
       "tag": "v3",
       "renamed_classes": [{ "from": "SessionIndex", "to": "PiSessionIndex" }]
+    },
+    {
+      "tag": "v4",
+      "new_sqlite_classes": ["PiSettings"]
     }
   ],
   "observability": {

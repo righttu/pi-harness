@@ -7,11 +7,13 @@
   "durable_objects": {
     "bindings": [
       { "name": "PI_HARNESS_TEST", "class_name": "PiHarnessTestObject" },
-      { "name": "PiSessionIndex", "class_name": "PiSessionIndex" }
+      { "name": "PiSessionIndex", "class_name": "PiSessionIndex" },
+      { "name": "PiSettings", "class_name": "PiSettings" }
     ]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["PiHarnessTestObject"] },
-    { "tag": "v2", "new_sqlite_classes": ["PiSessionIndex"] }
+    { "tag": "v2", "new_sqlite_classes": ["PiSessionIndex"] },
+    { "tag": "v3", "new_sqlite_classes": ["PiSettings"] }
   ]
 }

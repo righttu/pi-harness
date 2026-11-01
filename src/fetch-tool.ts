@@ -24,8 +24,8 @@ const TIMEOUT_MS = 30_000;
 
 export type FetchToolOptions = {
   workspace: Workspace;
-  /** 允许的主机名；"*" 表示全部。 */
-  allow: readonly string[];
+  /** 允许的主机名；"*" 表示全部。getter：实时读配置。 */
+  allow: () => readonly string[];
   /** 把相对/不规范的工作区路径规范化并检查在 /workspace 内。 */
   normalizePath: (path: string) => string;
 };
@@ -99,9 +99,10 @@ export function createFetchTool(options: FetchToolOptions): Extension {
           if (target.protocol !== "http:" && target.protocol !== "https:") {
             return fail(`Only http(s) URLs are allowed, got ${target.protocol}`);
           }
-          if (!allowed(target.hostname, options.allow)) {
+          const allow = options.allow();
+          if (!allowed(target.hostname, allow)) {
             return fail(
-              `Host ${target.hostname} is not in the allow list (${options.allow.join(", ")}). ` +
+              `Host ${target.hostname} is not in the allow list (${allow.join(", ")}). ` +
                 "Ask the user to add it to PI_FETCH_ALLOW if it is needed."
             );
           }

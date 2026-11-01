@@ -163,7 +163,7 @@ function textOf(message: AssistantMessage | undefined): string {
  * 在 server.ts 用 `registry.install(createSubagents({...}))`。
  */
 export function createSubagents(options: SubagentOptions = {}): Extension {
-  const childModel: ModelRef | undefined = options.childModel;
+  const childModel: (() => ModelRef | undefined) | undefined = options.childModel;
   const subagentsTool = defineTool({
   name: "subagents",
   description:
@@ -236,9 +236,10 @@ export function createSubagents(options: SubagentOptions = {}): Extension {
           ownership: { kind: "task", taskId: anchor }
         });
         // 子代理不能再派子代理；并且知道自己是谁。
+        const model = childModel?.();
         await configure(tx, child.id, {
           extensions: { remove: [SubagentsExtension] },
-          ...(childModel ? { model: childModel } : {}),
+          ...(model ? { model } : {}),
           instructions:
             `You are the subagent "${name}", working for a main agent in a shared workspace. ` +
             "Do the task you are given completely, then answer with the result. Do not ask the " +

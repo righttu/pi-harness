@@ -73,8 +73,8 @@ export const ReviewerRole: Extension = defineExtension({
 });
 
 export type QualityOptions = {
-  /** 子对话（reviewer）用的模型；不传继承主对话。 */
-  childModel?: ModelRef;
+  /** 子对话（reviewer）用的模型；不传或返回 undefined 继承主对话。getter，实时读配置。 */
+  childModel?: () => ModelRef | undefined;
   /** 工作区的全部工具；这里挑出只读的那几个。 */
   workspaceTools: readonly ToolRegistration[];
   /** 子对话里要移除的扩展：subagent / subagents / review 自己。 */
@@ -110,10 +110,11 @@ export function createReview(options: QualityOptions): Extension {
             const created = await tx.createConversation({
               ownership: { kind: "task", taskId: api.taskId }
             });
+            const model = options.childModel?.();
             await configure(tx, created.id, {
               extensions: { add: [ReviewerRole], remove: [...options.removeInChild, Review] },
               tools: readOnly,
-              ...(options.childModel ? { model: options.childModel } : {})
+              ...(model ? { model } : {})
             });
             return created.id;
           }, context);

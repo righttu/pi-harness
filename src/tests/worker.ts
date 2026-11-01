@@ -28,9 +28,10 @@ import {
 import { Lifecycle } from "agents/lifecycle";
 import { WebSockets } from "agents/websockets";
 import { PiSessionIndex } from "../sessions";
+import { PiSettings } from "../settings";
 import { PiSessionSockets } from "../sockets";
 
-export { PiSessionIndex };
+export { PiSessionIndex, PiSettings };
 import { EMPTY_VIEW, reduceEvents } from "../view";
 import { createWorkspaceTools, JAVASCRIPT_BACKEND } from "../workspace";
 
